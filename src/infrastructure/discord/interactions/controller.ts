@@ -20,9 +20,14 @@ import { TemplateRenderer } from '../../template/template-renderer.js';
 import { assertOwner, customId, parseCustomId, type ParsedCustomId } from './core/custom-id.js';
 import { pageOf, truncateMessage } from './core/pagination.js';
 import { organizationPanel } from './org/panel.js';
+import { roleBrowser, roleDetail } from './organization/roles.js';
+import { classificationBrowser } from './organization/classifications.js';
 import { publicationPanel } from './publication/panel.js';
+import { publicationBrowser, type PublicationBrowserItem } from './publication/browser.js';
 import { templatePanel } from './template/panel.js';
+import { templateBrowser, type TemplateBrowserItem } from './template/browser.js';
 import { termPanel } from './term/panel.js';
+import { discordTimestamp, formatTermStatus } from './presentation/formatters.js';
 
 type ComponentInteraction = ButtonInteraction<'cached'> | StringSelectMenuInteraction<'cached'> | RoleSelectMenuInteraction<'cached'>;
 
@@ -48,7 +53,7 @@ export class ManagementInteractionController {
   }
 
   async handleComponent(i: ComponentInteraction): Promise<boolean> {
-    if (!/^(org|term|tpl|pub|diag|help):v1:/.test(i.customId)) return false;
+    if (!/^(org|term|tpl|pub|diag|help):v[12]:/.test(i.customId)) return false;
     const parsed = parseCustomId(i.customId); assertOwner(parsed, i.user.id); this.authorize(i.member as GuildMember);
     if (i.isRoleSelectMenu()) await this.handleRoleSelect(i, parsed);
     else if (i.isStringSelectMenu()) await this.handleStringSelect(i, parsed);
@@ -57,7 +62,7 @@ export class ManagementInteractionController {
   }
 
   async handleModal(i: ModalSubmitInteraction<'cached'>): Promise<boolean> {
-    if (!/^(org|term|tpl|pub):v1:/.test(i.customId)) return false;
+    if (!/^(org|term|tpl|pub):v[12]:/.test(i.customId)) return false;
     const parsed = parseCustomId(i.customId); assertOwner(parsed, i.user.id); this.authorize(i.member as GuildMember);
     if (parsed.area === 'tpl') await this.templateModal(i, parsed);
     else if (parsed.area === 'org') await this.organizationModal(i, parsed);
@@ -90,12 +95,20 @@ export class ManagementInteractionController {
   }
 
   private orgPanel(org: typeof organizations.$inferSelect, owner: string) {
-    const active = this.db.select().from(terms).where(and(eq(terms.organizationId, org.id), eq(terms.status, 'active'))).get();
+    const active = this.db.select().from(terms).where(eq(terms.organizationId, org.id)).all().find((term) => ['active', 'suspended', 'scheduled'].includes(term.status));
+    const orgRoles = this.db.select().from(roleBindings).where(eq(roleBindings.organizationId, org.id)).all();
+    const orgClasses = this.db.select().from(classifications).where(eq(classifications.organizationId, org.id)).all();
+    const classIds = new Set(orgClasses.map((row) => row.id));
+    const orgTemplates = this.db.select().from(templates).where(eq(templates.organizationId, org.id)).all();
+    const orgPublications = this.db.select().from(publications).where(eq(publications.organizationId, org.id)).all();
     return organizationPanel(org, owner, {
-      roles: this.db.select().from(roleBindings).where(eq(roleBindings.organizationId, org.id)).all().length,
-      classifications: this.db.select().from(classifications).where(eq(classifications.organizationId, org.id)).all().length,
+      roles: orgRoles.length,
+      requiredRoleVacancies: orgRoles.filter((role) => role.required).length,
+      classifications: orgClasses.length,
+      classificationOptions: this.db.select().from(classificationOptions).all().filter((option) => classIds.has(option.classificationId)).length,
       fields: this.db.select().from(customFieldDefinitions).where(eq(customFieldDefinitions.organizationId, org.id)).all().length,
-      publications: this.db.select().from(publications).where(eq(publications.organizationId, org.id)).all().length,
+      publications: orgPublications.length, brokenPublications: orgPublications.filter((publication) => publication.broken || publication.lastRenderError).length,
+      templates: orgTemplates.length, draftTemplates: orgTemplates.filter((template) => template.isDraft).length,
       ...(active ? { term: active.displayName } : {})
     });
   }
@@ -120,7 +133,7 @@ export class ManagementInteractionController {
   private parseDate(value: string | null, fallback = new Date()): Date {
     if (!value) return fallback; const result = new Date(value); if (Number.isNaN(result.getTime())) throw new ApplicationError('VALIDATION_ERROR', '날짜는 ISO 8601 형식이어야 합니다.'); return result;
   }
-  private currentTerm(orgId: number) { return this.db.select().from(terms).where(and(eq(terms.organizationId, orgId), eq(terms.status, 'active'))).get(); }
+  private currentTerm(orgId: number) { return this.db.select().from(terms).where(eq(terms.organizationId, orgId)).all().find((term) => ['active', 'suspended', 'scheduled'].includes(term.status)); }
   private async handleTerm(i: ChatInputCommandInteraction<'cached'>, sub: string) {
     const org = this.organization(i.guildId, i.options.getString('organization', true));
     if (sub === 'start') {
@@ -131,7 +144,7 @@ export class ManagementInteractionController {
     }
     if (sub === 'manage') { await i.reply({ ...termPanel(org.name, org.id, this.currentTerm(org.id), i.user.id), ephemeral: true }); return; }
     const history = pageOf(this.db.select().from(terms).where(eq(terms.organizationId, org.id)).orderBy(asc(terms.startAt)).all().reverse(), 0);
-    await i.reply({ embeds: [new EmbedBuilder().setTitle(`${org.name} 임기 기록`).setDescription(history.items.length ? history.items.map((term) => `**${term.displayName}** · #${term.termNumber ?? '-'} · ${term.startAt.toISOString()} → ${term.actualEndAt?.toISOString() ?? term.scheduledEndAt?.toISOString() ?? '-'} · ${term.status}`).join('\n') : '임기 기록이 없습니다.').setFooter({ text: `${history.page + 1}/${history.pages} 페이지` })], ephemeral: true });
+    await i.reply({ embeds: [new EmbedBuilder().setTitle(`${org.name} 임기 기록`).setDescription(history.items.length ? history.items.map((term) => `**${term.displayName}** · ${term.termNumber === null ? '회차 미지정' : `${term.termNumber}기`} · ${discordTimestamp(term.startAt, 'D')} → ${discordTimestamp(term.actualEndAt ?? term.scheduledEndAt, 'D')} · ${formatTermStatus(term.status)}`).join('\n') : '임기 기록이 없습니다.').setFooter({ text: `${history.page + 1}/${history.pages} 페이지` })], ephemeral: true });
   }
 
   private async handleTemplate(i: ChatInputCommandInteraction<'cached'>, sub: string) {
@@ -150,8 +163,13 @@ export class ManagementInteractionController {
       const b = (label: string, action: string) => new ButtonBuilder().setCustomId(customId('tpl', action, target, i.user.id)).setLabel(label).setStyle(action === 'cancel' ? ButtonStyle.Secondary : ButtonStyle.Primary);
       await i.reply({ content: `**${name}** 템플릿의 입력 방식을 선택하세요.`, components: [new ActionRowBuilder<ButtonBuilder>().addComponents(b('직접 입력', 'create'), b('파일 가져오기', 'import'), b('기존 템플릿 복제', 'copy'), b('취소', 'cancel'))], ephemeral: true }); return;
     }
+    if (sub === 'manage') {
+      const key = i.options.getString('organization'); const org = key ? this.organization(i.guildId, key) : null;
+      const items = this.templateItems(i.guildId, org?.id ?? null);
+      if (items.length === 1) { const item = items[0]!; await i.reply({ ...templatePanel(item.template, item.organization.name, i.user.id, item.publicationCount), ephemeral: true }); return; }
+      await i.reply({ ...templateBrowser(items, i.user.id, org?.id ?? null), ephemeral: true }); return;
+    }
     const tpl = this.template(i.guildId, Number(i.options.getString('template', true)));
-    if (sub === 'manage') { const org = this.organizationById(i.guildId, tpl.organizationId); await i.reply({ ...templatePanel(tpl, org.name, i.user.id), ephemeral: true }); return; }
     await i.deferReply({ ephemeral: true }); await i.editReply(await this.previewTemplate(i, tpl));
   }
 
@@ -162,18 +180,38 @@ export class ManagementInteractionController {
 
   private async handlePublication(i: ChatInputCommandInteraction<'cached'>, sub: string) {
     if (sub === 'create') {
-      const org = this.organization(i.guildId, i.options.getString('organization', true)); const templateKey = i.options.getString('template', true);
-      const tpl = /^\d+$/.test(templateKey) ? this.template(i.guildId, Number(templateKey)) : this.db.select().from(templates).where(and(eq(templates.organizationId, org.id), eq(templates.name, templateKey))).get();
-      if (!tpl || tpl.organizationId !== org.id || tpl.isDraft) throw new ApplicationError('INVALID_TEMPLATE', '이 조직에서 사용할 수 있는 템플릿을 찾을 수 없습니다.');
-      const channel = i.options.getChannel('channel', true); const pub = this.db.insert(publications).values({ organizationId: org.id, templateId: tpl.id, channelId: channel.id, name: i.options.getString('name') ?? `${tpl.name} 게시`, autoRefresh: i.options.getBoolean('auto_refresh') ?? true }).returning().get();
-      if (channel.type === ChannelType.GuildForum) this.db.insert(forumPublicationSettings).values({ publicationId: pub.id, titleTemplate: tpl.name, appliedTagIdsJson: [] }).run();
-      this.audit(i.guildId, i.user.id, org.id, 'publication.created', { publicationId: pub.id, type: channel.type === ChannelType.GuildForum ? 'forum' : 'message' });
-      await i.reply({ ...publicationPanel(pub, i.user.id, channel.type === ChannelType.GuildForum), ephemeral: true }); return;
+      const org = this.organization(i.guildId, i.options.getString('organization', true)); const channel = i.options.getChannel('channel', true);
+      const available = this.db.select().from(templates).where(and(eq(templates.organizationId, org.id), eq(templates.isDraft, false))).all();
+      if (!available.length) { await i.reply({ content: `**${org.name}**에 사용 가능한 템플릿이 없습니다.\n먼저 템플릿을 만들거나 초안 상태를 해제해 주세요.`, components: [new ActionRowBuilder<ButtonBuilder>().addComponents(new ButtonBuilder().setCustomId(customId('org', 'templates', org.id, i.user.id)).setLabel('템플릿 관리 열기').setStyle(ButtonStyle.Primary))], ephemeral: true }); return; }
+      const sessionId = `p${randomUUID().replaceAll('-', '').slice(0, 23)}`;
+      this.db.insert(setupSessions).values({ id: sessionId, guildId: i.guildId, userId: i.user.id, kind: 'publication_create', state: { organizationId: org.id, channelId: channel.id, channelType: channel.type, name: i.options.getString('name'), autoRefresh: i.options.getBoolean('auto_refresh') ?? true }, expiresAt: new Date(Date.now() + 15 * 60_000) }).run();
+      await i.reply({ content: `**게시물 만들기 · ${org.name}**\n1. 템플릿 선택 ← 현재 단계\n2. 게시 설정\n3. 미리보기\n4. 저장 또는 게시\n\n초안 템플릿은 제외됩니다.`, components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(new StringSelectMenuBuilder().setCustomId(customId('pub', 'createtpl', sessionId, i.user.id)).setPlaceholder('사용 가능한 템플릿 선택').addOptions(available.slice(0, 25).map((template) => new StringSelectMenuOptionBuilder().setLabel(template.name.slice(0, 100)).setDescription(`${template.content.length.toLocaleString('ko-KR')}자 · 사용 가능`).setValue(String(template.id)))))], ephemeral: true }); return;
+    }
+    if (sub === 'manage') {
+      const key = i.options.getString('organization'); const org = key ? this.organization(i.guildId, key) : null;
+      const items = this.publicationItems(i.guildId, org?.id ?? null, i.guild.channels.cache.mapValues((channel) => channel.name));
+      if (items.length === 1) { await i.reply({ ...this.publicationDetail(items[0]!.publication, i), ephemeral: true }); return; }
+      await i.reply({ ...publicationBrowser(items, i.user.id, org?.id ?? null), ephemeral: true }); return;
     }
     const pub = this.publication(i.guildId, Number(i.options.getString('publication', true)));
     if (sub === 'refresh') { await i.deferReply({ ephemeral: true }); const result = await this.publicationService.refresh(pub.id); const fresh = this.publication(i.guildId, pub.id); await i.editReply(`✅ 갱신했습니다. ${fresh.messageId ? `메시지: ${fresh.messageId}` : ''}${this.diagnosticsText(result.diagnostics)}`); return; }
-    const forum = this.db.select().from(forumPublicationSettings).where(eq(forumPublicationSettings.publicationId, pub.id)).get();
-    await i.reply({ ...publicationPanel(pub, i.user.id, Boolean(forum), forum?.threadId), ephemeral: true });
+    await i.reply({ ...this.publicationDetail(pub, i), ephemeral: true });
+  }
+
+  private templateItems(guildId: string, organizationId: number | null): TemplateBrowserItem[] {
+    return this.db.select({ template: templates, organization: organizations }).from(templates).innerJoin(organizations, eq(organizations.id, templates.organizationId)).where(and(eq(organizations.guildId, guildId), isNull(organizations.deletedAt))).all()
+      .filter(({ template }) => organizationId === null || template.organizationId === organizationId)
+      .map(({ template, organization }) => ({ template, organization, publicationCount: this.db.select().from(publications).where(eq(publications.templateId, template.id)).all().length }));
+  }
+  private publicationItems(guildId: string, organizationId: number | null, channels: ReadonlyMap<string, { name: string }> | ReadonlyMap<string, string>): PublicationBrowserItem[] {
+    return this.db.select({ publication: publications, organization: organizations }).from(publications).innerJoin(organizations, eq(organizations.id, publications.organizationId)).where(and(eq(organizations.guildId, guildId), isNull(organizations.deletedAt))).all()
+      .filter(({ publication }) => organizationId === null || publication.organizationId === organizationId)
+      .map(({ publication, organization }) => { const channel = channels.get(publication.channelId); return { publication, organization, ...(channel ? { channelName: typeof channel === 'string' ? channel : channel.name } : {}) }; });
+  }
+  private publicationDetail(pub: typeof publications.$inferSelect, i: ChatInputCommandInteraction<'cached'> | ButtonInteraction<'cached'> | StringSelectMenuInteraction<'cached'>) {
+    const org = this.organizationById(i.guildId, pub.organizationId); const tpl = this.template(i.guildId, pub.templateId);
+    const forum = this.db.select().from(forumPublicationSettings).where(eq(forumPublicationSettings.publicationId, pub.id)).get(); const channel = i.guild.channels.cache.get(pub.channelId);
+    return publicationPanel(pub, i.user.id, { forum: Boolean(forum), threadId: forum?.threadId, organizationName: org.name, templateName: tpl.name, channelName: channel?.name });
   }
 
   private async handleDiagnose(i: ChatInputCommandInteraction<'cached'>) {
@@ -214,16 +252,21 @@ export class ManagementInteractionController {
   }
 
   private async orgButton(i: ButtonInteraction<'cached'>, p: ParsedCustomId) {
-    if (['roledelete', 'roleeditmodal', 'rolereordermodal'].includes(p.action)) throw new ApplicationError('VALIDATION_ERROR', '입력 화면을 다시 열어 주세요.');
+    if (['roleeditmodal', 'rolereordermodal'].includes(p.action)) throw new ApplicationError('VALIDATION_ERROR', '입력 화면을 다시 열어 주세요.');
+    if (['roleeditone', 'roledelete', 'roleholders'].includes(p.action)) { const binding = this.db.select().from(roleBindings).where(eq(roleBindings.id, Number(p.target))).get(); if (!binding) throw new ApplicationError('NOT_FOUND', '역할 연결이 삭제되었습니다.'); const org = this.organizationById(i.guildId, binding.organizationId); if (p.action === 'roleholders') { const holders = i.guild.roles.cache.get(binding.discordRoleId)?.members.map((member) => `<@${member.id}>`) ?? []; await i.reply({ content: `**${binding.displayName} · 현재 보유자 ${holders.length}명**\n${holders.join(' ') || '현재 보유자가 없습니다.'}`, ephemeral: true }); return; } if (p.action === 'roledelete') { await i.update({ content: `**${binding.displayName}** 역할 연결을 제거할까요? Discord 역할 자체는 삭제하지 않습니다.`, embeds: [], components: [new ActionRowBuilder<ButtonBuilder>().addComponents(new ButtonBuilder().setCustomId(customId('org', 'roledeleteyes', binding.id, i.user.id)).setLabel('제거 확인').setStyle(ButtonStyle.Danger), new ButtonBuilder().setCustomId(customId('org', 'roles', org.id, i.user.id)).setLabel('취소').setStyle(ButtonStyle.Secondary))] }); return; } const inputs = [new TextInputBuilder().setCustomId('name').setLabel('표시 이름').setStyle(TextInputStyle.Short).setValue(binding.displayName).setRequired(true), new TextInputBuilder().setCustomId('order').setLabel('표시 순서').setStyle(TextInputStyle.Short).setValue(String(binding.displayOrder)).setRequired(true)]; await i.showModal(new ModalBuilder().setCustomId(customId('org', 'roleeditmodal', binding.id, i.user.id)).setTitle('역할 연결 수정').addComponents(...inputs.map((input) => new ActionRowBuilder<TextInputBuilder>().addComponents(input)))); return; }
     if (p.action === 'roledeleteyes') { const binding = this.db.select().from(roleBindings).where(eq(roleBindings.id, Number(p.target))).get(); if (!binding) throw new ApplicationError('NOT_FOUND', '역할 연결이 이미 삭제되었습니다.'); const org = this.organizationById(i.guildId, binding.organizationId); this.db.delete(roleBindings).where(eq(roleBindings.id, binding.id)).run(); this.audit(i.guildId, i.user.id, org.id, 'role_binding.deleted', { bindingId: binding.id }); this.refreshOrganization(org.id); await i.update({ content: '역할 연결을 제거했습니다. Discord 역할은 그대로 유지됩니다.', components: [] }); return; }
     if (p.action === 'optionadd') { const classification = this.db.select().from(classifications).where(eq(classifications.id, Number(p.target))).get(); if (!classification) throw new ApplicationError('NOT_FOUND', '분류가 삭제되었습니다.'); this.organizationById(i.guildId, classification.organizationId); await i.reply({ content: '분류 선택지에 매핑할 Discord 역할을 선택하세요.', components: [new ActionRowBuilder<RoleSelectMenuBuilder>().addComponents(new RoleSelectMenuBuilder().setCustomId(customId('org', 'optionrole', classification.id, i.user.id)).setPlaceholder('Discord 역할'))], ephemeral: true }); return; }
     if (p.action === 'optiondeleteyes') { const option = this.db.select().from(classificationOptions).where(eq(classificationOptions.id, Number(p.target))).get(); if (!option) throw new ApplicationError('NOT_FOUND', '선택지가 이미 삭제되었습니다.'); const classification = this.db.select().from(classifications).where(eq(classifications.id, option.classificationId)).get(); if (!classification) throw new ApplicationError('NOT_FOUND', '분류가 삭제되었습니다.'); const org = this.organizationById(i.guildId, classification.organizationId); this.db.delete(classificationOptions).where(eq(classificationOptions.id, option.id)).run(); this.audit(i.guildId, i.user.id, org.id, 'classification_option.deleted', { optionId: option.id }); this.refreshOrganization(org.id); await i.update({ content: '분류 선택지를 삭제했습니다.', components: [] }); return; }
     if (['optionedit', 'optionremove', 'optionreorder'].includes(p.action)) { const classification = this.db.select().from(classifications).where(eq(classifications.id, Number(p.target))).get(); if (!classification) throw new ApplicationError('NOT_FOUND', '분류가 삭제되었습니다.'); this.organizationById(i.guildId, classification.organizationId); const rows = this.db.select().from(classificationOptions).where(eq(classificationOptions.classificationId, classification.id)).orderBy(asc(classificationOptions.displayOrder)).all().slice(0, 25); if (!rows.length) throw new ApplicationError('NOT_FOUND', '관리할 선택지가 없습니다.'); await i.reply({ content: '대상 선택지를 고르세요.', components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(new StringSelectMenuBuilder().setCustomId(customId('org', `${p.action}selected`, classification.id, i.user.id)).addOptions(rows.map((row) => new StringSelectMenuOptionBuilder().setLabel(row.displayName.slice(0, 100)).setValue(String(row.id)))))], ephemeral: true }); return; }
     const org = this.organizationById(i.guildId, Number(p.target));
     if (p.action === 'open') { await i.update(this.orgPanel(org, i.user.id)); return; }
+    if (p.action === 'templates') { await i.update(templateBrowser(this.templateItems(i.guildId, org.id), i.user.id, org.id)); return; }
+    if (p.action === 'publications') { await i.update(publicationBrowser(this.publicationItems(i.guildId, org.id, i.guild.channels.cache.mapValues((channel) => channel.name)), i.user.id, org.id)); return; }
+    if (p.action === 'preview') { await i.reply({ content: `**${org.name} 미리보기**\n게시 템플릿에서 보이는 실제 조직 정보는 템플릿 미리보기에서 확인할 수 있습니다.`, ephemeral: true }); return; }
     if (p.action === 'roles') {
       const roles = this.db.select().from(roleBindings).where(eq(roleBindings.organizationId, org.id)).orderBy(asc(roleBindings.displayOrder)).all();
-      await i.update({ content: `**${org.name} · 역할**\n${roles.length ? roles.map((r) => `• ${r.displayName} (<@&${r.discordRoleId}>) · ${r.kind}/${r.cardinality}${r.required ? ' · 필수' : ''}`).join('\n') : '연결된 역할이 없습니다.'}`, embeds: [], components: [new ActionRowBuilder<ButtonBuilder>().addComponents(new ButtonBuilder().setCustomId(customId('org', 'roleadd', org.id, i.user.id)).setLabel('추가').setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId(customId('org', 'roleedit', org.id, i.user.id)).setLabel('편집').setStyle(ButtonStyle.Secondary), new ButtonBuilder().setCustomId(customId('org', 'roleremove', org.id, i.user.id)).setLabel('제거').setStyle(ButtonStyle.Danger), new ButtonBuilder().setCustomId(customId('org', 'rolereorder', org.id, i.user.id)).setLabel('순서 변경').setStyle(ButtonStyle.Secondary))] }); return;
+      const counts = new Map(roles.map((binding) => [binding.discordRoleId, i.guild.roles.cache.get(binding.discordRoleId)?.members.size ?? 0]));
+      await i.update(roleBrowser(org.name, org.id, roles, i.user.id, counts)); return;
     }
     if (p.action === 'roleadd') { await i.reply({ content: '연결할 Discord 역할을 선택하세요.', components: [new ActionRowBuilder<RoleSelectMenuBuilder>().addComponents(new RoleSelectMenuBuilder().setCustomId(customId('org', 'roleselected', org.id, i.user.id)).setPlaceholder('Discord 역할'))], ephemeral: true }); return; }
     if (['roleedit', 'roleremove', 'rolereorder'].includes(p.action)) {
@@ -231,8 +274,9 @@ export class ManagementInteractionController {
       await i.reply({ content: '대상 역할 연결을 선택하세요.', components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(new StringSelectMenuBuilder().setCustomId(customId('org', `${p.action}selected`, org.id, i.user.id)).addOptions(rows.map((row) => new StringSelectMenuOptionBuilder().setLabel(row.displayName.slice(0, 100)).setDescription(`${row.kind}/${row.cardinality} · 순서 ${row.displayOrder}`).setValue(String(row.id)))))], ephemeral: true }); return;
     }
     if (p.action === 'classes') {
-      const rows = pageOf(this.db.select().from(classifications).where(eq(classifications.organizationId, org.id)).orderBy(asc(classifications.displayOrder)).all(), 0);
-      await i.reply({ content: `**${org.name} · 분류**\n${rows.items.length ? rows.items.map((row) => `• ${row.displayName} (\`${row.key}\`)`).join('\n') : '분류가 없습니다.'}`, components: [new ActionRowBuilder<ButtonBuilder>().addComponents(new ButtonBuilder().setCustomId(customId('org', 'classcreate', org.id, i.user.id)).setLabel('분류 만들기').setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId(customId('org', 'options', org.id, i.user.id)).setLabel('선택지 관리').setStyle(ButtonStyle.Secondary))], ephemeral: true }); return;
+      const rows = this.db.select().from(classifications).where(eq(classifications.organizationId, org.id)).orderBy(asc(classifications.displayOrder)).all(); const ids = new Set(rows.map((row) => row.id)); const counts = new Map<number, number>();
+      this.db.select().from(classificationOptions).all().filter((option) => ids.has(option.classificationId)).forEach((option) => counts.set(option.classificationId, (counts.get(option.classificationId) ?? 0) + 1));
+      await i.update(classificationBrowser(org.name, org.id, rows, i.user.id, counts)); return;
     }
     if (p.action === 'classcreate') { const fields = [new TextInputBuilder().setCustomId('key').setLabel('분류 키').setStyle(TextInputStyle.Short).setRequired(true), new TextInputBuilder().setCustomId('name').setLabel('표시 이름').setStyle(TextInputStyle.Short).setRequired(true), new TextInputBuilder().setCustomId('base').setLabel('기준 역할 연결 키').setStyle(TextInputStyle.Short).setRequired(true), new TextInputBuilder().setCustomId('settings').setLabel('exclusive, allow_unassigned').setPlaceholder('true, true').setStyle(TextInputStyle.Short).setRequired(true)]; await i.showModal(new ModalBuilder().setCustomId(customId('org', 'classmodal', org.id, i.user.id)).setTitle('분류 만들기').addComponents(...fields.map((field) => new ActionRowBuilder<TextInputBuilder>().addComponents(field)))); return; }
     if (p.action === 'options') { const rows = this.db.select().from(classifications).where(eq(classifications.organizationId, org.id)).all().slice(0, 25); if (!rows.length) throw new ApplicationError('NOT_FOUND', '먼저 분류를 만들어 주세요.'); await i.reply({ content: '선택지를 관리할 분류를 고르세요.', components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(new StringSelectMenuBuilder().setCustomId(customId('org', 'classselected', org.id, i.user.id)).addOptions(rows.map((row) => new StringSelectMenuOptionBuilder().setLabel(row.displayName.slice(0, 100)).setValue(String(row.id)))))], ephemeral: true }); return; }
@@ -261,6 +305,38 @@ export class ManagementInteractionController {
     await i.showModal(new ModalBuilder().setCustomId(customId('org', 'roleaddmodal', sessionId, i.user.id)).setTitle('역할 연결 추가').addComponents(...inputs.map((x) => new ActionRowBuilder<TextInputBuilder>().addComponents(x))));
   }
   private async handleStringSelect(i: StringSelectMenuInteraction<'cached'>, p: ParsedCustomId) {
+    if (p.area === 'org' && p.action === 'roleopen') {
+      const org = this.organizationById(i.guildId, Number(p.target));
+      const binding = this.db.select().from(roleBindings).where(and(eq(roleBindings.id, Number(i.values[0])), eq(roleBindings.organizationId, org.id))).get();
+      if (!binding) throw new ApplicationError('NOT_FOUND', '역할 연결이 삭제되었습니다.');
+      const holders = i.guild.roles.cache.get(binding.discordRoleId)?.members.map((member) => member.id) ?? [];
+      await i.update(roleDetail(org.name, org.id, binding, i.user.id, holders)); return;
+    }
+    if (p.area === 'org' && p.action === 'section') {
+      const action = i.values[0];
+      if (!action || !['info', 'roles', 'classes', 'fields', 'term', 'templates', 'publications', 'advanced'].includes(action)) throw new ApplicationError('VALIDATION_ERROR', '유효하지 않은 조직 관리 영역입니다.');
+      if (action === 'info') { const org = this.organizationById(i.guildId, Number(p.target)); await i.update({ content: `**${org.name} · 기본 정보**\n이름: ${org.name}\n설명: ${org.description ?? '없음'}`, embeds: [], components: [new ActionRowBuilder<ButtonBuilder>().addComponents(new ButtonBuilder().setCustomId(customId('org', 'open', org.id, i.user.id)).setLabel('뒤로').setStyle(ButtonStyle.Secondary))] }); return; }
+      if (action === 'templates') { const org = this.organizationById(i.guildId, Number(p.target)); await i.update(templateBrowser(this.templateItems(i.guildId, org.id), i.user.id, org.id)); return; }
+      if (action === 'publications') { const org = this.organizationById(i.guildId, Number(p.target)); await i.update(publicationBrowser(this.publicationItems(i.guildId, org.id, i.guild.channels.cache.mapValues((channel) => channel.name)), i.user.id, org.id)); return; }
+      if (action === 'advanced') { const org = this.organizationById(i.guildId, Number(p.target)); await i.update({ content: `**${org.name} · 고급 관리**\n위험한 작업은 확인 후 실행됩니다.`, embeds: [], components: [new ActionRowBuilder<ButtonBuilder>().addComponents(new ButtonBuilder().setCustomId(customId('org', 'delete', org.id, i.user.id)).setLabel('조직 삭제').setStyle(ButtonStyle.Danger), new ButtonBuilder().setCustomId(customId('org', 'open', org.id, i.user.id)).setLabel('뒤로').setStyle(ButtonStyle.Secondary))] }); return; }
+      await this.orgButton(i as unknown as ButtonInteraction<'cached'>, { ...p, action }); return;
+    }
+    if (p.area === 'tpl' && p.action === 'open') { const tpl = this.template(i.guildId, Number(i.values[0])); const org = this.organizationById(i.guildId, tpl.organizationId); const usage = this.db.select().from(publications).where(eq(publications.templateId, tpl.id)).all().length; await i.update(templatePanel(tpl, org.name, i.user.id, usage)); return; }
+    if (p.area === 'tpl' && p.action === 'actions') { const action = i.values[0]; if (!action || !['rename', 'duplicate', 'export', 'draft', 'delete'].includes(action)) throw new ApplicationError('VALIDATION_ERROR', '유효하지 않은 템플릿 작업입니다.'); await this.templateButton(i as unknown as ButtonInteraction<'cached'>, { ...p, action }); return; }
+    if (p.area === 'pub' && p.action === 'open') { const pub = this.publication(i.guildId, Number(i.values[0])); await i.update(this.publicationDetail(pub, i)); return; }
+    if (p.area === 'pub' && p.action === 'actions') { const action = i.values[0]; if (!action || !['edit', 'templatechange', 'forumtags', 'forumsettings', 'autorefresh', 'repair', 'delete'].includes(action)) throw new ApplicationError('VALIDATION_ERROR', '유효하지 않은 게시물 작업입니다.'); await this.publicationButton(i as unknown as ButtonInteraction<'cached'>, { ...p, action }); return; }
+    if (p.area === 'pub' && p.action === 'changetpl') { const pub = this.publication(i.guildId, Number(p.target)); const tpl = this.template(i.guildId, Number(i.values[0])); if (tpl.organizationId !== pub.organizationId || tpl.isDraft) throw new ApplicationError('INVALID_TEMPLATE', '이 게시물에 사용할 수 없는 템플릿입니다.'); this.db.update(publications).set({ templateId: tpl.id }).where(eq(publications.id, pub.id)).run(); this.audit(i.guildId, i.user.id, pub.organizationId, 'publication.template_changed', { publicationId: pub.id, templateId: tpl.id }); await i.update(this.publicationDetail({ ...pub, templateId: tpl.id }, i)); return; }
+    if (p.area === 'pub' && p.action === 'createtpl') {
+      const session = this.db.select().from(setupSessions).where(eq(setupSessions.id, p.target)).get();
+      if (!session || session.kind !== 'publication_create' || session.guildId !== i.guildId || session.userId !== i.user.id || session.expiresAt <= new Date()) throw new ApplicationError('VALIDATION_ERROR', '게시물 만들기 화면이 만료되었습니다. `/publication create`를 다시 실행해 주세요.');
+      const org = this.organizationById(i.guildId, Number(session.state.organizationId)); const tpl = this.template(i.guildId, Number(i.values[0]));
+      if (tpl.organizationId !== org.id || tpl.isDraft) throw new ApplicationError('INVALID_TEMPLATE', '이 조직에서 게시 가능한 템플릿이 아닙니다.');
+      const channelId = String(session.state.channelId); const channel = i.guild.channels.cache.get(channelId); if (!channel) throw new ApplicationError('NOT_FOUND', '선택한 채널이 삭제되었습니다.');
+      const pub = this.db.insert(publications).values({ organizationId: org.id, templateId: tpl.id, channelId, name: typeof session.state.name === 'string' && session.state.name ? session.state.name : `${tpl.name} 게시`, autoRefresh: Boolean(session.state.autoRefresh) }).returning().get();
+      if (Number(session.state.channelType) === ChannelType.GuildForum) this.db.insert(forumPublicationSettings).values({ publicationId: pub.id, titleTemplate: tpl.name, appliedTagIdsJson: [] }).run();
+      this.db.delete(setupSessions).where(eq(setupSessions.id, session.id)).run(); this.audit(i.guildId, i.user.id, org.id, 'publication.created', { publicationId: pub.id, templateId: tpl.id });
+      await i.update({ ...this.publicationDetail(pub, i), content: '템플릿을 선택해 게시 설정을 저장했습니다. 미리보기 후 게시할 수 있습니다.' }); return;
+    }
     if (p.area === 'org' && ['roleeditselected', 'roleremoveselected', 'rolereorderselected'].includes(p.action)) {
       const org = this.organizationById(i.guildId, Number(p.target)); const binding = this.db.select().from(roleBindings).where(and(eq(roleBindings.id, Number(i.values[0])), eq(roleBindings.organizationId, org.id))).get(); if (!binding) throw new ApplicationError('NOT_FOUND', '역할 연결이 삭제되었습니다.');
       if (p.action === 'roleremoveselected') { await i.update({ content: `**${binding.displayName}** 역할 연결을 제거할까요? Discord 역할 자체는 삭제하지 않습니다.`, components: [new ActionRowBuilder<ButtonBuilder>().addComponents(new ButtonBuilder().setCustomId(customId('org', 'roledeleteyes', binding.id, i.user.id)).setLabel('제거 확인').setStyle(ButtonStyle.Danger))] }); return; }
@@ -268,7 +344,20 @@ export class ManagementInteractionController {
       await i.showModal(new ModalBuilder().setCustomId(customId('org', action, binding.id, i.user.id)).setTitle(p.action === 'roleeditselected' ? '역할 연결 편집' : '역할 순서 변경').addComponents(...inputs.map((input) => new ActionRowBuilder<TextInputBuilder>().addComponents(input)))); return;
     }
     if (p.area === 'org' && p.action === 'fieldselected') { const org = this.organizationById(i.guildId, Number(p.target)); const definition = this.db.select().from(customFieldDefinitions).where(and(eq(customFieldDefinitions.id, Number(i.values[0])), eq(customFieldDefinitions.organizationId, org.id))).get(); if (!definition) throw new ApplicationError('NOT_FOUND', '필드가 삭제되었습니다.'); const current = definition.scope === 'term' ? this.currentTerm(org.id) : undefined; if (definition.scope === 'term' && !current) throw new ApplicationError('VALIDATION_ERROR', '현재 임기가 없어 임기 필드 값을 설정할 수 없습니다.'); const input = new TextInputBuilder().setCustomId('value').setLabel(`${definition.label} (${definition.type})`.slice(0, 45)).setStyle(definition.type === 'multiline_text' ? TextInputStyle.Paragraph : TextInputStyle.Short).setPlaceholder('비워서 제출하면 값을 지웁니다.').setRequired(false).setMaxLength(definition.type === 'multiline_text' ? 4000 : 1000); await i.showModal(new ModalBuilder().setCustomId(customId('org', 'fieldvaluemodal', definition.id, i.user.id)).setTitle('필드 값 설정·지우기').addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input))); return; }
-    if (p.area === 'org' && p.action === 'classselected') { const org = this.organizationById(i.guildId, Number(p.target)); const classification = this.db.select().from(classifications).where(and(eq(classifications.id, Number(i.values[0])), eq(classifications.organizationId, org.id))).get(); if (!classification) throw new ApplicationError('NOT_FOUND', '분류가 삭제되었습니다.'); const rows = pageOf(this.db.select().from(classificationOptions).where(eq(classificationOptions.classificationId, classification.id)).orderBy(asc(classificationOptions.displayOrder)).all(), 0); const button = (label: string, action: string, style = ButtonStyle.Secondary) => new ButtonBuilder().setCustomId(customId('org', action, classification.id, i.user.id)).setLabel(label).setStyle(style); await i.update({ content: `**${classification.displayName} · 선택지**\n${rows.items.length ? rows.items.map((row) => `• ${row.displayName} (<@&${row.discordRoleId}>) · 순서 ${row.displayOrder}`).join('\n') : '선택지가 없습니다.'}`, components: [new ActionRowBuilder<ButtonBuilder>().addComponents(button('추가', 'optionadd', ButtonStyle.Primary), button('편집', 'optionedit'), button('삭제', 'optionremove', ButtonStyle.Danger), button('순서 변경', 'optionreorder'))] }); return; }
+    if (p.area === 'org' && p.action === 'classselected') {
+      const org = this.organizationById(i.guildId, Number(p.target));
+      const classification = this.db.select().from(classifications).where(and(eq(classifications.id, Number(i.values[0])), eq(classifications.organizationId, org.id))).get();
+      if (!classification) throw new ApplicationError('NOT_FOUND', '분류가 삭제되었습니다.');
+      const rows = pageOf(this.db.select().from(classificationOptions).where(eq(classificationOptions.classificationId, classification.id)).orderBy(asc(classificationOptions.displayOrder)).all(), 0);
+      const button = (label: string, action: string, style = ButtonStyle.Secondary) => new ButtonBuilder().setCustomId(customId('org', action, classification.id, i.user.id)).setLabel(label).setStyle(style);
+      const components: Array<ActionRowBuilder<StringSelectMenuBuilder | ButtonBuilder>> = [];
+      if (rows.items.length) {
+        const options = rows.items.map((row) => new StringSelectMenuOptionBuilder().setLabel(row.displayName.slice(0, 100)).setDescription(`Discord 역할 · 현재 ${i.guild.roles.cache.get(row.discordRoleId)?.members.size ?? 0}명`).setValue(String(row.id)));
+        components.push(new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(new StringSelectMenuBuilder().setCustomId(customId('org', 'optioneditselected', classification.id, i.user.id)).setPlaceholder('선택지 선택').addOptions(options)));
+      }
+      components.push(new ActionRowBuilder<ButtonBuilder>().addComponents(button('선택지 추가', 'optionadd', ButtonStyle.Primary), new ButtonBuilder().setCustomId(customId('org', 'classes', org.id, i.user.id)).setLabel('뒤로').setStyle(ButtonStyle.Secondary)));
+      await i.update({ content: `**${org.name} · 구성원 분류 · ${classification.displayName}**\n기준 역할: ${classification.baseRoleKey}\n선택지 ${rows.items.length}개`, embeds: [], components }); return;
+    }
     if (p.area === 'org' && ['optioneditselected', 'optionremoveselected', 'optionreorderselected'].includes(p.action)) { const classification = this.db.select().from(classifications).where(eq(classifications.id, Number(p.target))).get(); if (!classification) throw new ApplicationError('NOT_FOUND', '분류가 삭제되었습니다.'); this.organizationById(i.guildId, classification.organizationId); const option = this.db.select().from(classificationOptions).where(and(eq(classificationOptions.id, Number(i.values[0])), eq(classificationOptions.classificationId, classification.id))).get(); if (!option) throw new ApplicationError('NOT_FOUND', '선택지가 삭제되었습니다.'); if (p.action === 'optionremoveselected') { await i.update({ content: `**${option.displayName}** 선택지를 삭제할까요?`, components: [new ActionRowBuilder<ButtonBuilder>().addComponents(new ButtonBuilder().setCustomId(customId('org', 'optiondeleteyes', option.id, i.user.id)).setLabel('삭제 확인').setStyle(ButtonStyle.Danger))] }); return; } const action = p.action === 'optioneditselected' ? 'optioneditmodal' : 'optionreordermodal'; const inputs = p.action === 'optioneditselected' ? [new TextInputBuilder().setCustomId('name').setLabel('표시 이름').setStyle(TextInputStyle.Short).setValue(option.displayName).setRequired(true), new TextInputBuilder().setCustomId('order').setLabel('표시 순서').setStyle(TextInputStyle.Short).setValue(String(option.displayOrder)).setRequired(true)] : [new TextInputBuilder().setCustomId('order').setLabel('표시 순서').setStyle(TextInputStyle.Short).setValue(String(option.displayOrder)).setRequired(true)]; await i.showModal(new ModalBuilder().setCustomId(customId('org', action, option.id, i.user.id)).setTitle('분류 선택지 편집').addComponents(...inputs.map((input) => new ActionRowBuilder<TextInputBuilder>().addComponents(input)))); return; }
     if (p.area === 'tpl' && p.action === 'copyselected') {
       const session = this.templateSession(i.guildId, i.user.id, p.target); const source = this.template(i.guildId, Number(i.values[0])); const orgId = Number(session.state.organizationId);
@@ -277,7 +366,7 @@ export class ManagementInteractionController {
       this.db.delete(setupSessions).where(eq(setupSessions.id, session.id)).run(); this.audit(i.guildId, i.user.id, orgId, 'template.duplicated', { sourceId: source.id, templateId: copy.id });
       await i.update({ ...templatePanel(copy, this.organizationById(i.guildId, orgId).name, i.user.id), content: '기존 템플릿을 초안으로 복제했습니다.' }); return;
     }
-    if (p.area === 'pub' && p.action === 'tagsselected') { const pub = this.publication(i.guildId, Number(p.target)); const settings = this.db.select().from(forumPublicationSettings).where(eq(forumPublicationSettings.publicationId, pub.id)).get(); if (!settings) throw new ApplicationError('VALIDATION_ERROR', '포럼 게시 설정이 아닙니다.'); this.db.update(forumPublicationSettings).set({ appliedTagIdsJson: i.values.slice(0, 5) }).where(eq(forumPublicationSettings.publicationId, pub.id)).run(); await i.update({ content: `태그 ID ${i.values.join(', ') || '없음'}을 저장했습니다.`, components: [] }); return; }
+    if (p.area === 'pub' && p.action === 'tagsselected') { const pub = this.publication(i.guildId, Number(p.target)); const settings = this.db.select().from(forumPublicationSettings).where(eq(forumPublicationSettings.publicationId, pub.id)).get(); if (!settings) throw new ApplicationError('VALIDATION_ERROR', '포럼 게시 설정이 아닙니다.'); this.db.update(forumPublicationSettings).set({ appliedTagIdsJson: i.values.slice(0, 5) }).where(eq(forumPublicationSettings.publicationId, pub.id)).run(); await i.update({ content: `포럼 태그 ${i.values.length}개를 저장했습니다.`, components: [] }); return; }
     throw new ApplicationError('VALIDATION_ERROR', '잘못된 선택 메뉴입니다.');
   }
 
@@ -298,9 +387,10 @@ export class ManagementInteractionController {
 
   private async termButton(i: ButtonInteraction<'cached'>, p: ParsedCustomId) {
     const org = this.organizationById(i.guildId, Number(p.target)); const current = p.action === 'resume' ? this.db.select().from(terms).where(and(eq(terms.organizationId, org.id), eq(terms.status, 'suspended'))).get() : this.currentTerm(org.id);
+    if (p.action === 'org') { await i.update(this.orgPanel(org, i.user.id)); return; }
     if (p.action === 'end') { if (!current) throw new ApplicationError('NOT_FOUND', '현재 임기가 없습니다.'); await i.update({ content: `**${current.displayName}** 임기를 종료할까요? 되돌릴 수 없습니다.`, embeds: [], components: [new ActionRowBuilder<ButtonBuilder>().addComponents(new ButtonBuilder().setCustomId(customId('term', 'endyes', org.id, i.user.id)).setLabel('종료 확인').setStyle(ButtonStyle.Danger), new ButtonBuilder().setCustomId(customId('term', 'history', org.id, i.user.id)).setLabel('취소').setStyle(ButtonStyle.Secondary))] }); return; }
     const targets = { pause: 'suspended', resume: 'active', endyes: 'ended' } as const; const target = targets[p.action as keyof typeof targets];
-    if (target) { if (!current) throw new ApplicationError('NOT_FOUND', '전환할 임기가 없습니다.'); assertTermTransition(current.status, target); this.db.update(terms).set({ status: target, actualEndAt: target === 'ended' ? new Date() : current.actualEndAt }).where(and(eq(terms.id, current.id), eq(terms.status, current.status))).run(); this.audit(i.guildId, i.user.id, org.id, `term.${target}`, { termId: current.id }); await i.update({ ...termPanel(org.name, org.id, target === 'active' ? { ...current, status: target } : undefined, i.user.id), content: `임기를 ${target}(으)로 변경했습니다.` }); return; }
+    if (target) { if (!current) throw new ApplicationError('NOT_FOUND', '전환할 임기가 없습니다.'); assertTermTransition(current.status, target); this.db.update(terms).set({ status: target, actualEndAt: target === 'ended' ? new Date() : current.actualEndAt }).where(and(eq(terms.id, current.id), eq(terms.status, current.status))).run(); this.audit(i.guildId, i.user.id, org.id, `term.${target}`, { termId: current.id }); await i.update({ ...termPanel(org.name, org.id, target === 'ended' ? undefined : { ...current, status: target }, i.user.id), content: `임기 상태를 변경했습니다.` }); return; }
     await i.reply({ content: p.action === 'start' ? `새 임기는 \`/term start organization:${org.key}\`로 시작하세요.` : `임기 상세 작업은 \`/term manage organization:${org.key}\`에서 계속할 수 있습니다.`, ephemeral: true });
   }
   private async termModal(_i: ModalSubmitInteraction<'cached'>, _p: ParsedCustomId) { throw new ApplicationError('VALIDATION_ERROR', '지원하지 않는 임기 입력입니다.'); }
@@ -310,6 +400,7 @@ export class ManagementInteractionController {
     if (!row) throw new ApplicationError('VALIDATION_ERROR', '템플릿 생성 화면이 만료되었습니다.'); return row;
   }
   private async templateButton(i: ButtonInteraction<'cached'>, p: ParsedCustomId) {
+    if (p.action === 'list') { const [rawOrg, rawPage] = p.target.split('_'); const orgId = Number(rawOrg); const page = Number(rawPage); await i.update(templateBrowser(this.templateItems(i.guildId, orgId || null), i.user.id, orgId || null, page)); return; }
     if (['create', 'import', 'copy', 'cancel'].includes(p.action)) {
       const session = this.templateSession(i.guildId, i.user.id, p.target); if (p.action === 'cancel') { this.db.delete(setupSessions).where(eq(setupSessions.id, session.id)).run(); await i.update({ content: '템플릿 만들기를 취소했습니다.', components: [] }); return; }
       if (p.action === 'import') { await i.update({ content: 'Discord 모달에는 파일 필드가 없습니다. `/template create`를 다시 열고 선택 입력인 `file`에 UTF-8 .txt 파일(최대 100KB)을 첨부하세요. 이름과 조직 선택은 그대로 사용할 수 있습니다.', components: [] }); return; }
@@ -317,6 +408,8 @@ export class ManagementInteractionController {
       const input = new TextInputBuilder().setCustomId('content').setLabel('Liquid 템플릿 내용').setStyle(TextInputStyle.Paragraph).setMaxLength(4000).setRequired(true); await i.showModal(new ModalBuilder().setCustomId(customId('tpl', 'createmodal', p.target, i.user.id)).setTitle('템플릿 직접 입력').addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input))); return;
     }
     const tpl = this.template(i.guildId, Number(p.target));
+    if (p.action === 'back') { await i.update(templateBrowser(this.templateItems(i.guildId, tpl.organizationId), i.user.id, tpl.organizationId)); return; }
+    if (p.action === 'org') { await i.update(this.orgPanel(this.organizationById(i.guildId, tpl.organizationId), i.user.id)); return; }
     if (p.action === 'preview') { await i.reply({ content: await this.previewTemplate(i, tpl), ephemeral: true }); return; }
     if (p.action === 'draft') { this.db.update(templates).set({ isDraft: !tpl.isDraft }).where(eq(templates.id, tpl.id)).run(); await i.update(templatePanel({ ...tpl, isDraft: !tpl.isDraft }, this.organizationById(i.guildId, tpl.organizationId).name, i.user.id)); return; }
     if (p.action === 'duplicate') { let name = `${tpl.name} 복사본`; let n = 2; while (this.db.select().from(templates).where(and(eq(templates.organizationId, tpl.organizationId), eq(templates.name, name))).get()) name = `${tpl.name} 복사본 ${n++}`; const copy = this.db.insert(templates).values({ organizationId: tpl.organizationId, name, content: tpl.content, isDraft: true }).returning().get(); this.audit(i.guildId, i.user.id, tpl.organizationId, 'template.duplicated', { sourceId: tpl.id, templateId: copy.id }); await i.reply({ ...templatePanel(copy, this.organizationById(i.guildId, tpl.organizationId).name, i.user.id), ephemeral: true }); return; }
@@ -336,11 +429,16 @@ export class ManagementInteractionController {
   }
 
   private async publicationButton(i: ButtonInteraction<'cached'>, p: ParsedCustomId) {
+    if (p.action === 'list') { const [rawOrg, rawPage] = p.target.split('_'); const orgId = Number(rawOrg); const page = Number(rawPage); await i.update(publicationBrowser(this.publicationItems(i.guildId, orgId || null, i.guild.channels.cache.mapValues((channel) => channel.name)), i.user.id, orgId || null, page)); return; }
     const pub = this.publication(i.guildId, Number(p.target)); const forum = this.db.select().from(forumPublicationSettings).where(eq(forumPublicationSettings.publicationId, pub.id)).get();
+    if (p.action === 'back') { await i.update(publicationBrowser(this.publicationItems(i.guildId, pub.organizationId, i.guild.channels.cache.mapValues((channel) => channel.name)), i.user.id, pub.organizationId)); return; }
+    if (p.action === 'org') { await i.update(this.orgPanel(this.organizationById(i.guildId, pub.organizationId), i.user.id)); return; }
     if (p.action === 'preview') { const tpl = this.template(i.guildId, pub.templateId); await i.reply({ content: await this.previewTemplate(i, tpl), ephemeral: true }); return; }
-    if (p.action === 'publish' || p.action === 'repair') { await i.deferReply({ ephemeral: true }); const result = await this.publicationService.refresh(pub.id, p.action === 'repair'); const fresh = this.publication(i.guildId, pub.id); this.audit(i.guildId, i.user.id, pub.organizationId, p.action === 'repair' ? 'publication.repaired' : 'publication.published', { publicationId: pub.id }); await i.editReply(`✅ ${p.action === 'repair' ? '복구·재연결' : fresh.messageId === pub.messageId ? '갱신' : '게시'}했습니다.${this.diagnosticsText(result.diagnostics)}`); return; }
-    if (p.action === 'autorefresh') { this.db.update(publications).set({ autoRefresh: !pub.autoRefresh }).where(eq(publications.id, pub.id)).run(); await i.update(publicationPanel({ ...pub, autoRefresh: !pub.autoRefresh }, i.user.id, Boolean(forum), forum?.threadId)); return; }
-    if (p.action === 'forumtags') { const channel = await i.guild.channels.fetch(pub.channelId); if (!forum || channel?.type !== ChannelType.GuildForum) throw new ApplicationError('VALIDATION_ERROR', '포럼 게시 설정이 아닙니다.'); const options = channel.availableTags.slice(0, 25).map((tag) => new StringSelectMenuOptionBuilder().setLabel(tag.name.slice(0, 100)).setValue(tag.id).setDefault(forum.appliedTagIdsJson.includes(tag.id))); if (!options.length) throw new ApplicationError('VALIDATION_ERROR', '선택할 수 있는 포럼 태그가 없습니다.'); await i.reply({ content: '태그를 최대 5개 선택하세요. 태그 이름이 아닌 Discord 태그 ID로 저장됩니다.', components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(new StringSelectMenuBuilder().setCustomId(customId('pub', 'tagsselected', pub.id, i.user.id)).setMinValues(0).setMaxValues(Math.min(5, options.length)).addOptions(options))], ephemeral: true }); return; }
+    if (p.action === 'repair') { await i.update({ content: '기존 연결 대신 새 게시물 또는 스레드를 만들고 저장된 연결을 교체할까요?', embeds: [], components: [new ActionRowBuilder<ButtonBuilder>().addComponents(new ButtonBuilder().setCustomId(customId('pub', 'repairyes', pub.id, i.user.id)).setLabel('대체 게시물 만들기').setStyle(ButtonStyle.Danger), new ButtonBuilder().setCustomId(customId('pub', 'back', pub.id, i.user.id)).setLabel('취소').setStyle(ButtonStyle.Secondary))] }); return; }
+    if (p.action === 'publish' || p.action === 'repairyes') { await i.deferReply({ ephemeral: true }); const repairing = p.action === 'repairyes'; const result = await this.publicationService.refresh(pub.id, repairing); const fresh = this.publication(i.guildId, pub.id); this.audit(i.guildId, i.user.id, pub.organizationId, repairing ? 'publication.repaired' : 'publication.published', { publicationId: pub.id }); await i.editReply(`✅ ${repairing ? '복구·재연결' : fresh.messageId === pub.messageId ? '갱신' : '게시'}했습니다.${this.diagnosticsText(result.diagnostics)}`); return; }
+    if (p.action === 'templatechange') { const candidates = this.db.select().from(templates).where(and(eq(templates.organizationId, pub.organizationId), eq(templates.isDraft, false))).all().slice(0, 25); if (!candidates.length) throw new ApplicationError('NOT_FOUND', '변경할 수 있는 사용 가능 템플릿이 없습니다.'); await i.reply({ content: '게시물에 사용할 템플릿을 선택하세요. 초안은 제외됩니다.', components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(new StringSelectMenuBuilder().setCustomId(customId('pub', 'changetpl', pub.id, i.user.id)).setPlaceholder('사용 가능 템플릿 선택').addOptions(candidates.map((template) => new StringSelectMenuOptionBuilder().setLabel(template.name.slice(0, 100)).setValue(String(template.id)))))], ephemeral: true }); return; }
+    if (p.action === 'autorefresh') { this.db.update(publications).set({ autoRefresh: !pub.autoRefresh }).where(eq(publications.id, pub.id)).run(); await i.update(this.publicationDetail({ ...pub, autoRefresh: !pub.autoRefresh }, i)); return; }
+    if (p.action === 'forumtags') { const channel = await i.guild.channels.fetch(pub.channelId); if (!forum || channel?.type !== ChannelType.GuildForum) throw new ApplicationError('VALIDATION_ERROR', '포럼 게시 설정이 아닙니다.'); const options = channel.availableTags.slice(0, 25).map((tag) => new StringSelectMenuOptionBuilder().setLabel(tag.name.slice(0, 100)).setValue(tag.id).setDefault(forum.appliedTagIdsJson.includes(tag.id))); if (!options.length) throw new ApplicationError('VALIDATION_ERROR', '선택할 수 있는 포럼 태그가 없습니다.'); await i.reply({ content: '적용할 태그를 이름으로 최대 5개 선택하세요.', components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(new StringSelectMenuBuilder().setCustomId(customId('pub', 'tagsselected', pub.id, i.user.id)).setMinValues(0).setMaxValues(Math.min(5, options.length)).addOptions(options))], ephemeral: true }); return; }
     if (p.action === 'forumsettings') { if (!forum) throw new ApplicationError('VALIDATION_ERROR', '포럼 게시 설정이 아닙니다.'); const fields = [new TextInputBuilder().setCustomId('title').setLabel('Liquid 제목 템플릿').setStyle(TextInputStyle.Short).setValue(forum.titleTemplate.slice(0, 100)).setRequired(true), new TextInputBuilder().setCustomId('archive').setLabel('자동 보관(60|1440|4320|10080)').setStyle(TextInputStyle.Short).setValue(String(forum.autoArchiveDuration)).setRequired(true), new TextInputBuilder().setCustomId('slowmode').setLabel('slowmode 초').setStyle(TextInputStyle.Short).setValue(String(forum.slowmodeSeconds)).setRequired(true), new TextInputBuilder().setCustomId('flags').setLabel('archive, lock, preserve_manual_tags').setStyle(TextInputStyle.Short).setValue([forum.archiveAfterPublish && 'archive', forum.lockAfterPublish && 'lock', forum.preserveManualTags && 'preserve_manual_tags'].filter(Boolean).join(', ')).setRequired(false)]; await i.showModal(new ModalBuilder().setCustomId(customId('pub', 'forumsettingsmodal', pub.id, i.user.id)).setTitle('포럼 스레드 설정').addComponents(...fields.map((field) => new ActionRowBuilder<TextInputBuilder>().addComponents(field)))); return; }
     if (p.action === 'edit') { const fields = [new TextInputBuilder().setCustomId('name').setLabel('게시 설정 이름').setStyle(TextInputStyle.Short).setValue(pub.name).setRequired(true), new TextInputBuilder().setCustomId('auto').setLabel('자동 갱신: true | false').setStyle(TextInputStyle.Short).setValue(String(pub.autoRefresh)).setRequired(true)]; await i.showModal(new ModalBuilder().setCustomId(customId('pub', 'editmodal', pub.id, i.user.id)).setTitle('게시 설정 편집').addComponents(...fields.map((field) => new ActionRowBuilder<TextInputBuilder>().addComponents(field)))); return; }
     if (p.action === 'delete') { await i.update({ content: '게시 설정만 삭제합니다. 기존 Discord 메시지나 포럼 글은 삭제하지 않습니다. 계속할까요?', embeds: [], components: [new ActionRowBuilder<ButtonBuilder>().addComponents(new ButtonBuilder().setCustomId(customId('pub', 'deleteyes', pub.id, i.user.id)).setLabel('설정 삭제 확인').setStyle(ButtonStyle.Danger))] }); return; }

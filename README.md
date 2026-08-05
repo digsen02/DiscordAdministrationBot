@@ -1,5 +1,18 @@
 # Discord Organization Manager
 
+## 선택형 관리 UX
+
+관리 화면은 사람이 읽을 수 있는 이름과 상태를 먼저 보여 주며, 데이터베이스 ID는 Discord 컴포넌트의 값과 라우팅에만 사용합니다. 관리자는 조직 키, 템플릿 ID, 게시물 ID, enum 값 또는 포럼 태그 ID를 외울 필요가 없습니다.
+
+- `/org manage` → 조직 대시보드 → 영역 선택 → 목록 또는 상세 화면 → 작업 → **뒤로**
+- `/template manage` → 선택적으로 조직 필터 → 템플릿 선택 → 상태·사용 현황 확인 → 미리보기 또는 수정
+- `/publication create` → 조직과 채널 선택 → 게시 가능한 템플릿 선택 → 설정 확인 → 미리보기 → 게시
+- `/publication manage` → 선택적으로 조직 필터 → 게시물 선택 → 연결 상태 확인 → 상황에 맞는 작업
+
+`organization`, `/template preview`의 `template`, `/publication refresh`의 `publication` 옵션은 자동완성을 지원합니다. 검색 결과에는 이름과 상태가 표시되지만 저장과 상호작용에는 기존의 안정적인 키와 ID를 그대로 사용합니다. 템플릿과 게시물 목록은 한 페이지에 최대 25개를 표시하고 이전/다음 버튼으로 이동합니다.
+
+조직 삭제는 첫 대시보드에 노출되지 않고 **고급 관리**에 있습니다. 게시물 복구는 연결이 끊어졌거나 렌더 오류가 있는 경우에만 표시되며, 자동 갱신 메뉴는 실행 결과가 **켜기** 또는 **끄기**인지 명시합니다. 이미 열린 v1 패널과 기존 데이터, 게시 메시지·스레드 연결은 계속 호환됩니다.
+
 ## 봇 소개
 
 Discord Organization Manager는 서버에 이미 있는 Discord 역할을 읽어 조직의 직책, 구성원, 분류와 임기를 계산하고, 그 결과를 Liquid 템플릿으로 게시하는 관리 봇입니다. 학생회, 운영진, 동아리, 길드, 의회처럼 구성원이 역할로 구분되는 조직에 사용할 수 있습니다.
@@ -162,7 +175,7 @@ npm start
 | 분류 | 버튼 → modal·select menu | 분류 key·이름·기준 역할 key·배타성·미분류 허용, 선택지 역할·순서 | 역할 기반 분류 계산과 게시 컨텍스트 변경 |
 | 사용자 정의 필드 | 버튼 → modal·select menu | key, label, 범위, 형식, 필수 여부, 순서, select 값과 실제 값 | 조직 또는 현재 임기의 `fields.<key>` 값 변경 |
 | 임기 | 버튼 → 임기 패널 | 현재 임기 확인, 일시 중지·재개·종료, 기록 | 임기 상태 변경 |
-| 게시물 | 버튼 → 읽기 목록 | publication ID, 이름, 게시 여부 확인 | 상세 관리는 `/publication manage`에서 계속 |
+| 게시물 | 영역 선택 → 게시물 select menu | 이름, 채널, 게시 상태 확인 | 선택한 게시물의 상세 화면에서 계속 |
 | 삭제 | Danger 버튼 → 확인 버튼 | 조직 삭제 확인 | 조직을 soft delete하여 공개 목록과 관리에서 숨김 |
 
 > [!WARNING]
@@ -254,10 +267,10 @@ npm start
 ### 게시물 만들기
 
 ```text
-/publication create organization:council template:학생회 현황 channel:#조직-안내 name:학생회 안내 auto_refresh:true
+/publication create organization:학생회 channel:#조직-안내 name:학생회 안내 auto_refresh:true
 ```
 
-`template`에는 템플릿 ID 또는 같은 조직의 정확한 이름을 입력합니다. 대상 채널이 일반 텍스트·공지 채널이면 일반 publication을, 포럼 채널이면 forum publication을 만듭니다. 개별 forum thread는 대상 채널로 선택할 수 없습니다.
+명령 실행 후 해당 조직의 사용 가능한 템플릿을 이름과 사용 현황으로 선택합니다. 초안은 선택 목록에서 제외됩니다. 대상 채널이 일반 텍스트·공지 채널이면 일반 publication을, 포럼 채널이면 forum publication을 만듭니다. 개별 forum thread는 대상 채널로 선택할 수 없습니다.
 
 ## 공개 명령어
 
@@ -281,15 +294,15 @@ npm start
 | `/term manage` | 현재 임기 상태 관리 | `organization` | 없음 | 임기 패널 | `/term manage organization:council` |
 | `/term history` | 임기 이력 조회 | `organization` | 없음 | 최근 기록 첫 페이지 | `/term history organization:council` |
 | `/template create` | 템플릿 생성 | `organization`, `name` | `file` | 입력 방식 선택 또는 템플릿 패널 | `/template create organization:council name:현황` |
-| `/template manage` | 템플릿 편집·복제·삭제 | `template` ID | 없음 | 템플릿 관리 패널 | `/template manage template:3` |
-| `/template preview` | 현재 데이터로 본문 렌더링 | `template` ID | 없음 | ephemeral 미리보기, 오류와 길이 | `/template preview template:3` |
-| `/publication create` | 게시 설정 생성 | `organization`, `template`, `channel` | `name`, `auto_refresh` | 일반·포럼 게시 패널 | `/publication create organization:council template:3 channel:#안내` |
-| `/publication manage` | 게시·복구·설정·삭제 | `publication` ID | 없음 | 게시 관리 패널 | `/publication manage publication:4` |
-| `/publication refresh` | 기존 publication 즉시 갱신 | `publication` ID | 없음 | 같은 메시지/thread 수정과 진단 | `/publication refresh publication:4` |
+| `/template manage` | 템플릿 검색·편집·복제·삭제 | 없음 | `organization` 자동완성 | 이름·상태 기반 템플릿 브라우저 | `/template manage organization:학생회` |
+| `/template preview` | 현재 데이터로 본문 렌더링 | `template` 자동완성 | 없음 | ephemeral 미리보기, 오류와 길이 | `/template preview template:학생회 현황` |
+| `/publication create` | 게시 설정 생성 | `organization`, `channel` | `name`, `auto_refresh` | 사용 가능한 템플릿 선택 후 게시 패널 | `/publication create organization:학생회 channel:#안내` |
+| `/publication manage` | 게시·복구·설정·삭제 | 없음 | `organization` 자동완성 | 이름·채널·상태 기반 게시물 브라우저 | `/publication manage organization:학생회` |
+| `/publication refresh` | 기존 publication 즉시 갱신 | `publication` 자동완성 | 없음 | 같은 메시지/thread 수정과 진단 | `/publication refresh publication:학생회 안내` |
 | `/diagnose` | 서버·조직·게시 범위 진단 | `scope` | `target` | 통합 진단 패널 | `/diagnose scope:organization target:council` |
 | `/help` | 작업별 도움말 | 없음 | 없음 | 버튼형 도움말 | `/help` |
 
-`/diagnose`의 `scope`는 `guild`, `organization`, `publication` 중 하나입니다. `organization`에는 조직 key, `publication`에는 publication ID를 `target`으로 입력합니다. 현재 `publication` 범위는 target publication이 속한 조직을 찾은 뒤 그 조직의 publication 전체를 검사합니다.
+`/diagnose`의 `scope`는 `guild`, `organization`, `publication` 중 하나입니다. 조직과 게시물 대상은 `target` 자동완성에서 이름으로 선택합니다. 현재 `publication` 범위는 선택한 게시물이 속한 조직을 찾은 뒤 그 조직의 publication 전체를 검사합니다.
 
 ## 게시 기능
 
@@ -394,7 +407,7 @@ publication에는 starter message ID를, forum 설정에는 thread ID를 저장�
 
 ### 게시물 복구와 재연결
 
-메시지나 thread가 삭제됐거나 ID 연결이 잘못됐으면 `/publication manage publication:<ID>` → **복구·재연결**을 누릅니다. 일반 채널에는 새 메시지를, 포럼에는 새 thread와 starter message를 만들고 새 ID를 저장합니다.
+메시지나 thread가 삭제됐으면 `/publication manage`에서 이름과 오류 상태로 게시물을 선택한 뒤 **설정 및 기타 작업** → **연결 복구**를 누릅니다. 확인 후 일반 채널에는 새 메시지를, 포럼에는 새 thread와 starter message를 만들고 내부 연결을 갱신합니다.
 
 복구는 항상 새 Discord 콘텐츠를 만듭니다. 기존 콘텐츠가 아직 남아 있는데 복구를 누르면 중복이 생길 수 있으므로 먼저 **게시물 열기**와 `/diagnose`로 확인하세요. 같은 bot 프로세스에서 동시에 들어온 복구 요청은 하나로 합쳐지지만 여러 프로세스 사이의 중복까지 막지는 못합니다.
 
@@ -832,7 +845,7 @@ uri_escape, url_decode, url_encode, where, where_exp, xml_escape
 
 - **증상:** 미리보기에 문법·렌더 오류가 나오거나 게시되지 않습니다.
 - **가능한 원인:** 알 수 없는 role·field key는 빈 값이 되며, 잘못된 tag, 닫히지 않은 `if`/`for`, 존재하지 않는 filter, 금지된 include 또는 안전하지 않은 mention은 오류가 됩니다.
-- **확인 방법:** `/template preview template:<ID>`에서 오류 문구와 2,000자 길이를 확인합니다. forum 제목은 publication 미리보기에 포함되지 않으므로 **포럼 설정**도 확인합니다.
+- **확인 방법:** `/template preview`의 자동완성에서 템플릿 이름을 선택해 오류 문구와 2,000자 길이를 확인합니다. forum 제목은 publication 미리보기에 포함되지 않으므로 **스레드 설정**도 확인합니다.
 - **해결 방법:** `default`를 사용하고 key 철자를 고치며 모든 `{% if %}`/`{% for %}`를 `{% endif %}`/`{% endfor %}`로 닫습니다. 본문을 2,000자 이하로 줄이고 제목이 비지 않게 합니다.
 - **관련 진단 코드:** `INVALID_TEMPLATE`, `OUTPUT_TOO_LONG`, `FORUM_TITLE_EMPTY`, `PUBLICATION_REFRESH_FAILURE`
 
@@ -868,7 +881,7 @@ uri_escape, url_decode, url_encode, where, where_exp, xml_escape
 
 - **증상:** log에 `automatic publication refresh failed`가 반복됩니다.
 - **가능한 원인:** 삭제된 채널·게시물, 권한, template, locked thread 또는 tag 설정 오류가 고쳐지지 않았습니다.
-- **확인 방법:** log의 publication ID로 `/publication manage`와 `/diagnose scope:publication`을 실행합니다.
+- **확인 방법:** log를 참고하되 `/publication manage`와 `/diagnose scope:publication`의 자동완성에서 게시물 이름을 선택합니다.
 - **해결 방법:** 아래 진단 표에 따라 원인을 고치고 `/publication refresh`를 성공시킨 뒤 자동 갱신을 다시 확인합니다.
 
 ## 진단 결과 읽는 법

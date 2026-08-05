@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { DateTime } from 'luxon';
 import { and, eq, isNull } from 'drizzle-orm';
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, ModalBuilder, StringSelectMenuBuilder, StringSelectMenuOptionBuilder, TextInputBuilder, TextInputStyle, type ButtonInteraction, type ChatInputCommandInteraction, type ForumChannel, type GuildMember, type ModalSubmitInteraction, type RoleSelectMenuInteraction, type StringSelectMenuInteraction } from 'discord.js';
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, ModalBuilder, StringSelectMenuBuilder, StringSelectMenuOptionBuilder, TextInputBuilder, TextInputStyle, type AutocompleteInteraction, type ButtonInteraction, type ChatInputCommandInteraction, type ForumChannel, type GuildMember, type ModalSubmitInteraction, type RoleSelectMenuInteraction, type StringSelectMenuInteraction } from 'discord.js';
 import { assertTermTransition, assertCanStartTerm, type TermStatus } from '../../domain/term/lifecycle.js';
 import { assertSafeKey } from '../../domain/shared/key.js';
 import { validateFieldValue } from '../../domain/custom-field/validator.js';
@@ -15,16 +15,23 @@ import { auditLogs, classificationOptions, classifications, customFieldDefinitio
 import type { Logger } from '../logging/logger.js';
 import type { RefreshQueue } from '../scheduler/refresh-queue.js';
 import { TemplateRenderer } from '../template/template-renderer.js';
-import { ManagementInteractionController } from './interactions/controller.js';
+import { ManagementInteractionRouter } from './interactions/router.js';
+import { ManagementAutocompleteController } from './interactions/autocomplete.js';
 
 export class InteractionHandler {
   private readonly organizations: OrganizationService;
   private readonly permissions: PermissionService;
   private readonly renderer = new TemplateRenderer();
-  private readonly management: ManagementInteractionController;
+  private readonly management: ManagementInteractionRouter;
+  private readonly autocomplete: ManagementAutocompleteController;
   constructor(private readonly db: AppDatabase, private readonly publicationService: PublicationService, private readonly queue: RefreshQueue, private readonly logger: Logger) {
     this.organizations = new OrganizationService(db); this.permissions = new PermissionService(db);
-    this.management = new ManagementInteractionController(db, publicationService, queue);
+    this.management = new ManagementInteractionRouter(db, publicationService, queue);
+    this.autocomplete = new ManagementAutocompleteController(db);
+  }
+  async handleAutocomplete(interaction: AutocompleteInteraction): Promise<void> {
+    if (!interaction.inCachedGuild()) { await interaction.respond([]); return; }
+    try { await this.autocomplete.handle(interaction); } catch (error) { this.logger.warn({ err: error, guildId: interaction.guildId }, 'autocomplete failed'); await interaction.respond([]).catch(() => undefined); }
   }
   async handle(interaction: ChatInputCommandInteraction): Promise<void> {
     const correlationId = randomUUID();

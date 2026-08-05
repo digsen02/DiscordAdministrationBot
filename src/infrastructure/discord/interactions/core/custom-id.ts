@@ -1,12 +1,21 @@
 import { ApplicationError } from '../../../../app/errors/application-error.js';
 
 export type InteractionArea = 'org' | 'term' | 'tpl' | 'pub' | 'diag' | 'help';
-export interface ParsedCustomId { area: InteractionArea; version: 1; action: string; target: string; owner: string }
+export interface ParsedCustomId { area: InteractionArea; version: 1 | 2; action: string; target: string; owner: string }
 
 const PART = /^[A-Za-z0-9_-]{1,32}$/;
 
 export function customId(area: InteractionArea, action: string, target: string | number, owner: string): string {
-  const parts = [area, 'v1', action, String(target), owner];
+  return buildCustomId(area, 1, action, target, owner);
+}
+
+/** New management screens use v2 while v1 remains parseable for already-open panels. */
+export function managementId(area: InteractionArea, action: string, target: string | number, owner: string): string {
+  return buildCustomId(area, 2, action, target, owner);
+}
+
+function buildCustomId(area: InteractionArea, version: 1 | 2, action: string, target: string | number, owner: string): string {
+  const parts = [area, `v${version}`, action, String(target), owner];
   if (!parts.every((part) => PART.test(part))) throw new ApplicationError('VALIDATION_ERROR', '상호작용 식별자를 만들 수 없습니다.');
   const value = parts.join(':');
   if (value.length > 100) throw new ApplicationError('VALIDATION_ERROR', '상호작용 식별자가 Discord 제한을 초과했습니다.');
@@ -17,8 +26,8 @@ export function parseCustomId(value: string): ParsedCustomId {
   const parts = value.split(':');
   if (parts.length !== 5 || !parts.every((part) => PART.test(part))) throw new ApplicationError('VALIDATION_ERROR', '잘못되었거나 오래된 상호작용입니다.');
   const [area, version, action, target, owner] = parts;
-  if (!['org', 'term', 'tpl', 'pub', 'diag', 'help'].includes(area!) || version !== 'v1') throw new ApplicationError('VALIDATION_ERROR', '지원하지 않는 상호작용 버전입니다.');
-  return { area: area as InteractionArea, version: 1, action: action!, target: target!, owner: owner! };
+  if (!['org', 'term', 'tpl', 'pub', 'diag', 'help'].includes(area!) || !['v1', 'v2'].includes(version!)) throw new ApplicationError('VALIDATION_ERROR', '지원하지 않는 상호작용 버전입니다.');
+  return { area: area as InteractionArea, version: version === 'v2' ? 2 : 1, action: action!, target: target!, owner: owner! };
 }
 
 export function assertOwner(parsed: ParsedCustomId, userId: string): void {
