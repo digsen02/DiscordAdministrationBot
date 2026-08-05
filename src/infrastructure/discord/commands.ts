@@ -1,61 +1,60 @@
-import { ApplicationCommandOptionType, type RESTPostAPIApplicationCommandsJSONBody } from 'discord.js';
+import { ApplicationCommandOptionType, ChannelType, type RESTPostAPIApplicationCommandsJSONBody } from 'discord.js';
 
-const S = ApplicationCommandOptionType.String, I = ApplicationCommandOptionType.Integer, B = ApplicationCommandOptionType.Boolean;
-const R = ApplicationCommandOptionType.Role, C = ApplicationCommandOptionType.Channel, A = ApplicationCommandOptionType.Attachment;
-const str = (name: string, description: string, required = true) => ({ type: S, name, description, required });
-const int = (name: string, description: string, required = true) => ({ type: I, name, description, required });
-const bool = (name: string, description: string, required = true) => ({ type: B, name, description, required });
-const role = (name: string, description: string) => ({ type: R, name, description, required: true });
-const optionalRole = (name: string, description: string) => ({ type: R, name, description, required: false });
-const channel = (name: string, description: string) => ({ type: C, name, description, required: true });
-const optionalChannel = (name: string, description: string) => ({ type: C, name, description, required: false });
-const attachment = (name: string, description: string) => ({ type: A, name, description, required: true });
-const choice = (name: string, description: string, values: readonly string[]) => ({ ...str(name, description), choices: values.map((value) => ({ name: value, value })) });
-const sub = (name: string, description: string, options: object[] = []) => ({ type: ApplicationCommandOptionType.Subcommand, name, description, options });
-const command = (name: string, description: string, options: object[]): RESTPostAPIApplicationCommandsJSONBody => ({ name, description, options }) as RESTPostAPIApplicationCommandsJSONBody;
-const org = () => str('organization', '조직 내부 키');
+const stringOption = (name: string, description: string, required = true) => ({
+  type: ApplicationCommandOptionType.String, name, description, required
+});
+const booleanOption = (name: string, description: string, required = false) => ({
+  type: ApplicationCommandOptionType.Boolean, name, description, required
+});
+const attachmentOption = (name: string, description: string) => ({
+  type: ApplicationCommandOptionType.Attachment, name, description, required: false
+});
+const channelOption = (name: string, description: string) => ({
+  type: ApplicationCommandOptionType.Channel, name, description, required: true,
+  channel_types: [ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.GuildForum]
+});
+const subcommand = (name: string, description: string, options: object[] = []) => ({
+  type: ApplicationCommandOptionType.Subcommand, name, description, options
+});
+const command = (name: string, description: string, options: object[] = []): RESTPostAPIApplicationCommandsJSONBody =>
+  ({ name, description, options }) as RESTPostAPIApplicationCommandsJSONBody;
+const organization = () => stringOption('organization', '조직 키');
 
+/** Stage 3 public surface. Legacy handlers remain in the codebase for data and service compatibility. */
 export const commands: RESTPostAPIApplicationCommandsJSONBody[] = [
-  command('org', '조직을 관리합니다.', [
-    sub('create', '조직을 생성합니다.', [str('key', '고유 내부 키'), str('name', '표시 이름'), str('foreign_name', '외국어 이름', false), str('pronunciation', '발음', false), str('description', '설명', false)]),
-    sub('edit', '조직 정보를 수정합니다.', [org(), str('name', '새 표시 이름', false), str('description', '새 설명', false)]), sub('show', '조직 상세를 표시합니다.', [org()]),
-    sub('list', '조직 목록을 표시합니다.'), sub('delete', '조직을 삭제합니다.', [org(), bool('confirm', '삭제 확인', false)]), sub('inspect', '조직 설정을 진단합니다.', [org()]),
-    sub('config', '서버별 봇 설정을 변경합니다.', [str('time_zone', 'IANA 시간대(예: Asia/Seoul)', false), str('locale', 'locale(예: ko-KR)', false), optionalRole('administrator_role', '봇 관리자 역할')])
+  command('org', '조직을 만들고 관리합니다.', [
+    subcommand('create', '새 조직을 만듭니다.', [
+      stringOption('name', '조직 이름'), stringOption('key', '고유 조직 키'),
+      stringOption('description', '조직 설명', false)
+    ]),
+    subcommand('manage', '조직 관리 패널을 엽니다.', [organization()]),
+    subcommand('list', '서버의 조직 목록을 봅니다.')
   ]),
-  command('org-role', '조직 역할 연결을 관리합니다.', [
-    sub('add', '역할 연결을 추가합니다.', [org(), str('key', '내부 키'), str('display_name', '표시 이름'), role('role', '연결할 Discord 역할'), choice('kind', '종류', ['office', 'membership']), choice('cardinality', '허용 인원', ['one', 'many']), bool('required', '필수 여부'), int('display_order', '표시 순서', false)]),
-    sub('edit', '역할 연결을 수정합니다.', [org(), str('key', '역할 연결 키'), str('display_name', '새 표시 이름', false), optionalRole('role', '새 Discord 역할')]),
-    sub('remove', '역할 연결을 제거합니다.', [org(), str('key', '역할 연결 키'), bool('confirm', '삭제 확인', false)]), sub('list', '역할 연결 목록을 표시합니다.', [org()])
+  command('term', '임기를 시작하고 관리합니다.', [
+    subcommand('start', '새 임기를 시작합니다.', [
+      organization(), stringOption('name', '임기 이름'),
+      stringOption('start_at', '시작 시각(ISO 8601)', false),
+      stringOption('scheduled_end_at', '예정 종료 시각(ISO 8601)', false)
+    ]),
+    subcommand('manage', '현재 임기 관리 패널을 엽니다.', [organization()]),
+    subcommand('history', '과거 임기 목록을 봅니다.', [organization()])
   ]),
-  command('org-field', '사용자 정의 필드를 관리합니다.', [
-    sub('add', '필드 정의를 추가합니다.', [org(), str('key', '내부 키'), str('label', '표시 이름'), choice('scope', '범위', ['organization', 'term']), choice('type', '형식', ['text','multiline_text','number','date','datetime','boolean','select','role','channel']), bool('required', '필수 여부'), str('select_options', '선택값(쉼표 구분)', false), str('default_value', '기본값', false)]),
-    sub('edit', '필드 정의를 수정합니다.', [org(), str('key', '필드 키'), str('label', '새 표시 이름', false)]), sub('remove', '필드 정의를 제거합니다.', [org(), str('key', '필드 키'), bool('confirm', '삭제 확인', false)]),
-    sub('list', '필드 목록을 표시합니다.', [org()]), sub('set', '필드 값을 설정합니다.', [org(), str('key', '필드 키'), str('value', '일반/날짜/숫자 값', false), optionalRole('role_value', 'role 형식 값'), optionalChannel('channel_value', 'channel 형식 값'), int('term_id', '임기 ID(임기 필드)', false)])
+  command('template', 'Liquid 템플릿을 만들고 관리합니다.', [
+    subcommand('create', '새 템플릿 입력 방식을 선택합니다.', [organization(), stringOption('name', '템플릿 이름'), attachmentOption('file', '선택: UTF-8 .txt 파일(최대 100KB)')]),
+    subcommand('manage', '템플릿 관리 패널을 엽니다.', [stringOption('template', '템플릿 ID')]),
+    subcommand('preview', '최신 조직·임기 문맥으로 미리 봅니다.', [stringOption('template', '템플릿 ID')])
   ]),
-  command('classification', '분류를 관리합니다.', [
-    sub('create', '분류를 생성합니다.', [org(), str('key', '내부 키'), str('display_name', '표시 이름'), str('base_role_key', '기준 역할 연결 키'), bool('exclusive', '배타적 분류'), bool('allow_unassigned', '미지정 허용'), str('unassigned_label', '미지정 표시 이름'), str('capacity_field_key', '정원 필드 키', false)]),
-    sub('edit', '분류를 수정합니다.', [org(), str('key', '분류 키'), str('display_name', '새 표시 이름')]), sub('remove', '분류를 제거합니다.', [org(), str('key', '분류 키'), bool('confirm', '삭제 확인', false)]), sub('list', '분류 목록을 표시합니다.', [org()])
+  command('publication', '일반·포럼 게시물을 만들고 관리합니다.', [
+    subcommand('create', '게시 설정 패널을 엽니다.', [
+      organization(), stringOption('template', '템플릿 ID 또는 이름'), channelOption('channel', '대상 채널'),
+      stringOption('name', '게시 설정 이름', false), booleanOption('auto_refresh', '자동 갱신', false)
+    ]),
+    subcommand('manage', '게시물 관리 패널을 엽니다.', [stringOption('publication', '게시 설정 ID')]),
+    subcommand('refresh', '게시물을 즉시 갱신합니다.', [stringOption('publication', '게시 설정 ID')])
   ]),
-  command('classification-option', '분류 선택지를 관리합니다.', [
-    sub('add', '분류 선택지를 추가합니다.', [org(), str('classification', '분류 키'), str('key', '선택지 키'), str('display_name', '표시 이름'), role('role', '연결할 Discord 역할'), int('display_order', '표시 순서', false)]),
-    sub('edit', '선택지를 수정합니다.', [org(), str('classification', '분류 키'), str('key', '선택지 키'), str('display_name', '새 표시 이름')]),
-    sub('remove', '선택지를 제거합니다.', [org(), str('classification', '분류 키'), str('key', '선택지 키'), bool('confirm', '삭제 확인', false)])
+  command('diagnose', '서버·조직·게시물 문제를 통합 진단합니다.', [
+    { ...stringOption('scope', '진단 범위'), choices: ['guild', 'organization', 'publication'].map((value) => ({ name: value, value })) },
+    stringOption('target', '조직 키 또는 게시 설정 ID', false)
   ]),
-  command('term', '임기를 관리합니다.', [
-    sub('start', '새 임기를 시작합니다.', [org(), str('name', '임기 표시 이름'), int('number', '임기 번호', false), str('start_at', '시작 시각(ISO 8601)', false), str('scheduled_end_at', '예정 종료 시각(ISO 8601)', false), bool('close_current', '기존 활성 임기 종료', false), str('field_values', '필수 임기 필드(key=value;key=value)', false)]),
-    sub('edit', '임기 정보를 수정합니다.', [org(), int('term_id', '임기 ID'), str('name', '새 표시 이름', false), str('scheduled_end_at', '새 예정 종료 시각', false)]),
-    ...['end','dissolve','suspend','resume'].map((name) => sub(name, `임기를 ${name} 상태로 변경합니다.`, [org(), str('reason', '사유', false)])),
-    sub('show', '현재 임기를 표시합니다.', [org()]), sub('history', '임기 기록을 표시합니다.', [org()])
-  ]),
-  command('template', '게시 템플릿을 관리합니다.', [
-    sub('create', '템플릿을 생성합니다.', [org(), str('name', '템플릿 이름'), str('content', 'Liquid 내용(생략 시 modal)', false), bool('draft', '초안으로 저장', false)]),
-    sub('edit', '템플릿을 수정합니다.', [org(), str('name', '템플릿 이름'), str('content', '새 내용(생략 시 modal)', false), bool('draft', '초안 여부', false)]),
-    sub('import', 'UTF-8 텍스트 파일을 가져옵니다.', [org(), str('name', '템플릿 이름'), attachment('file', 'UTF-8 .txt 파일'), bool('draft', '초안으로 저장', false)]),
-    sub('preview', '템플릿을 미리 봅니다.', [org(), str('name', '템플릿 이름')]), sub('show', '템플릿 내용을 표시합니다.', [org(), str('name', '템플릿 이름')]), sub('list', '템플릿 목록을 표시합니다.', [org()]), sub('delete', '템플릿을 삭제합니다.', [org(), str('name', '템플릿 이름'), bool('confirm', '삭제 확인', false)])
-  ]),
-  command('publication', '자동 갱신 게시물을 관리합니다.', [
-    sub('create', '게시 설정을 생성합니다.', [org(), str('name', '게시 이름'), str('template', '템플릿 이름'), channel('channel', '게시 채널'), bool('auto_refresh', '자동 갱신', false)]),
-    ...['publish','preview','refresh','repair'].map((name) => sub(name, `게시물을 ${name} 처리합니다.`, [int('publication_id', '게시 설정 ID')])),
-    sub('list', '게시 설정 목록을 표시합니다.', [org()]), sub('delete', '게시 설정을 삭제합니다.', [int('publication_id', '게시 설정 ID'), bool('confirm', '삭제 확인', false)])
-  ])
+  command('help', '작업 중심의 대화형 도움말을 엽니다.')
 ];

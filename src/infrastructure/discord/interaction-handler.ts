@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { DateTime } from 'luxon';
 import { and, eq, isNull } from 'drizzle-orm';
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, ModalBuilder, StringSelectMenuBuilder, StringSelectMenuOptionBuilder, TextInputBuilder, TextInputStyle, type ButtonInteraction, type ChatInputCommandInteraction, type ForumChannel, type GuildMember, type ModalSubmitInteraction, type StringSelectMenuInteraction } from 'discord.js';
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, ModalBuilder, StringSelectMenuBuilder, StringSelectMenuOptionBuilder, TextInputBuilder, TextInputStyle, type ButtonInteraction, type ChatInputCommandInteraction, type ForumChannel, type GuildMember, type ModalSubmitInteraction, type RoleSelectMenuInteraction, type StringSelectMenuInteraction } from 'discord.js';
 import { assertTermTransition, assertCanStartTerm, type TermStatus } from '../../domain/term/lifecycle.js';
 import { assertSafeKey } from '../../domain/shared/key.js';
 import { validateFieldValue } from '../../domain/custom-field/validator.js';
@@ -15,18 +15,22 @@ import { auditLogs, classificationOptions, classifications, customFieldDefinitio
 import type { Logger } from '../logging/logger.js';
 import type { RefreshQueue } from '../scheduler/refresh-queue.js';
 import { TemplateRenderer } from '../template/template-renderer.js';
+import { ManagementInteractionController } from './interactions/controller.js';
 
 export class InteractionHandler {
   private readonly organizations: OrganizationService;
   private readonly permissions: PermissionService;
   private readonly renderer = new TemplateRenderer();
+  private readonly management: ManagementInteractionController;
   constructor(private readonly db: AppDatabase, private readonly publicationService: PublicationService, private readonly queue: RefreshQueue, private readonly logger: Logger) {
     this.organizations = new OrganizationService(db); this.permissions = new PermissionService(db);
+    this.management = new ManagementInteractionController(db, publicationService, queue);
   }
   async handle(interaction: ChatInputCommandInteraction): Promise<void> {
     const correlationId = randomUUID();
     try {
       if (!interaction.inCachedGuild()) throw new ApplicationError('VALIDATION_ERROR', '서버 안에서만 사용할 수 있습니다.');
+      if (this.management.supportsCommand(interaction.commandName)) { await this.management.handleCommand(interaction); return; }
       this.permissions.assertAdministrator(interaction.member as GuildMember);
       const subcommand = interaction.options.getSubcommand(); const destructive = subcommand === 'delete' || subcommand === 'remove';
       if (interaction.commandName === 'publication' && subcommand === 'create') {
@@ -66,6 +70,7 @@ export class InteractionHandler {
     const correlationId = randomUUID();
     try {
       if (!interaction.inCachedGuild()) throw new ApplicationError('VALIDATION_ERROR', '유효하지 않은 설정 화면입니다.');
+      if (await this.management.handleModal(interaction)) return;
       if (interaction.customId.startsWith('forum:')) { await this.completeForumSettingsModal(interaction); return; }
       if (interaction.customId.startsWith('field:')) { this.permissions.assertAdministrator(interaction.member as GuildMember); const message = this.completeFieldSession(interaction.customId.slice('field:'.length), interaction.guildId, interaction.user.id, interaction.fields.getTextInputValue('value')); await interaction.reply({ content: message, ephemeral: true }); return; }
       if (!interaction.customId.startsWith('template:')) throw new ApplicationError('VALIDATION_ERROR', '유효하지 않은 설정 화면입니다.');
@@ -84,12 +89,25 @@ export class InteractionHandler {
     const correlationId = randomUUID();
     try {
       if (!interaction.inCachedGuild()) throw new ApplicationError('VALIDATION_ERROR', '유효하지 않은 선택 요청입니다.');
+      if (await this.management.handleComponent(interaction)) return;
       this.permissions.assertAdministrator(interaction.member as GuildMember);
       if (interaction.customId.startsWith('forum-tags:')) { const sessionId = interaction.customId.slice('forum-tags:'.length); const selectedChannel = await interaction.guild.channels.fetch(String(this.forumSession(sessionId, interaction.guildId, interaction.user.id).publication.channelId)); if (!selectedChannel || selectedChannel.type !== ChannelType.GuildForum) throw new ApplicationError('VALIDATION_ERROR', '선택한 채널이 더 이상 포럼 채널이 아닙니다.'); const panel = await this.updateForumTags(sessionId, interaction.guildId, interaction.user.id, interaction.values, selectedChannel); await interaction.update(panel); return; }
       if (!interaction.customId.startsWith('field:')) throw new ApplicationError('VALIDATION_ERROR', '유효하지 않은 선택 요청입니다.');
       const message = this.completeFieldSession(interaction.customId.slice('field:'.length), interaction.guildId, interaction.user.id, interaction.values[0] ?? ''); await interaction.update({ content: message, components: [] });
     }
     catch (error) { this.logger.error({ err: error, correlationId, guildId: interaction.guildId, userId: interaction.user.id }, 'select failed'); const content = `${userMessage(error)}\n문의 코드: ${correlationId}`; if (interaction.replied || interaction.deferred) await interaction.editReply({ content, components: [] }).catch(() => undefined); else await interaction.reply({ content, ephemeral: true }).catch(() => undefined); }
+  }
+  async handleRoleSelect(interaction: RoleSelectMenuInteraction): Promise<void> {
+    const correlationId = randomUUID();
+    try {
+      if (!interaction.inCachedGuild()) throw new ApplicationError('VALIDATION_ERROR', '서버 안에서만 사용할 수 있습니다.');
+      if (!await this.management.handleComponent(interaction)) throw new ApplicationError('VALIDATION_ERROR', '잘못된 역할 선택입니다.');
+    } catch (error) {
+      this.logger.error({ err: error, correlationId, guildId: interaction.guildId, userId: interaction.user.id }, 'role select failed');
+      const content = `${userMessage(error)}\n문의 코드: ${correlationId}`;
+      if (interaction.replied || interaction.deferred) await interaction.editReply({ content, components: [] }).catch(() => undefined);
+      else await interaction.reply({ content, ephemeral: true }).catch(() => undefined);
+    }
   }
   private completeFieldSession(sessionId: string, guildId: string, userId: string, rawValue: string): string {
     const session = this.db.select().from(setupSessions).where(eq(setupSessions.id, sessionId)).get(); if (!session || session.kind !== 'field_input' || session.guildId !== guildId || session.userId !== userId || session.expiresAt <= new Date()) throw new ApplicationError('VALIDATION_ERROR', '필드 입력 화면이 만료되었습니다.');
@@ -100,6 +118,7 @@ export class InteractionHandler {
     const correlationId = randomUUID();
     try {
       if (!interaction.inCachedGuild()) throw new ApplicationError('VALIDATION_ERROR', '유효하지 않은 확인 요청입니다.'); this.permissions.assertAdministrator(interaction.member as GuildMember);
+      if (await this.management.handleComponent(interaction)) return;
       if (interaction.customId.startsWith('forum:')) { await this.handleForumButton(interaction); return; }
       if (!interaction.customId.startsWith('confirm:')) throw new ApplicationError('VALIDATION_ERROR', '유효하지 않은 확인 요청입니다.');
       const [, sessionId, decision] = interaction.customId.split(':'); if (!sessionId) throw new ApplicationError('VALIDATION_ERROR', '확인 요청 ID가 없습니다.'); const session = this.db.select().from(setupSessions).where(eq(setupSessions.id, sessionId)).get();

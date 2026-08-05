@@ -30,9 +30,20 @@ const VALID_ARCHIVE_DURATIONS = new Set([60, 1440, 4320, 10080]);
 export class PublicationService {
   private readonly renderer = new TemplateRenderer();
   private readonly contexts: ContextBuilder;
+  private readonly refreshLocks = new Map<number, Promise<PublicationRefreshResult>>();
   constructor(private readonly db: AppDatabase, private readonly client: Client) { this.contexts = new ContextBuilder(db); }
 
   async refresh(publicationId: number, repair = false): Promise<PublicationRefreshResult> {
+    const running = this.refreshLocks.get(publicationId);
+    if (running) return running;
+    const operation = this.refreshUnlocked(publicationId, repair).finally(() => {
+      if (this.refreshLocks.get(publicationId) === operation) this.refreshLocks.delete(publicationId);
+    });
+    this.refreshLocks.set(publicationId, operation);
+    return operation;
+  }
+
+  private async refreshUnlocked(publicationId: number, repair: boolean): Promise<PublicationRefreshResult> {
     const publication = this.db.select().from(publications).where(eq(publications.id, publicationId)).get();
     if (!publication) throw new ApplicationError('NOT_FOUND', '게시 설정을 찾을 수 없습니다.');
     const template = this.db.select().from(templates).where(eq(templates.id, publication.templateId)).get();
