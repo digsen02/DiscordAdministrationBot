@@ -59,6 +59,9 @@ Developer Portal의 `OAuth2` → `URL Generator`에서 다음 scope를 선택합
 
 - View Channels
 - Send Messages
+- Send Messages in Threads
+- Create Public Threads
+- Manage Threads
 - Read Message History
 
 생성된 URL로 봇을 테스트 서버에 초대합니다. Discord 클라이언트의 개발자 모드는 서버 ID를 복사할 때만 필요합니다.
@@ -255,6 +258,25 @@ auto_refresh: true
 
 이후 `@회장` 또는 `@운영진` 역할 보유자가 변경되면 약 5초 동안 변경을 모은 뒤 같은 Discord 메시지를 수정합니다.
 
+#### 포럼 채널에 게시하기
+
+`channel`에 Discord 포럼 채널을 선택하면 일반 텍스트 채널과 달리 게시 설정 초안과 대화형 설정 패널이 생성됩니다.
+
+1. 태그 다중 선택 메뉴에서 적용할 포럼 태그를 최대 5개까지 선택합니다.
+2. `설정 입력`을 눌러 포럼 제목 Liquid 템플릿, 자동 보관 시간, 슬로우모드와 게시 후 동작을 입력합니다.
+3. `미리보기`로 렌더링된 제목과 본문을 확인합니다.
+4. `저장`을 누른 뒤 표시된 publication ID로 `/publication publish`를 실행합니다.
+
+설정 패널에는 현재 선택한 태그, 자동 보관 시간, 슬로우모드, 자동 갱신 상태, 게시 후 보관·잠금과 수동 태그 보존 여부가 표시됩니다. 제목 템플릿이 비어 있으면 최종 저장할 수 없으며, `취소`를 누르면 초안과 포럼 설정이 함께 삭제됩니다.
+
+`설정 입력`의 게시 후 동작 필드에는 필요한 값을 쉼표로 구분해 입력합니다.
+
+- `archive`: 최초 게시 후 스레드 보관
+- `lock`: 최초 게시 후 스레드 잠금
+- `preserve_manual_tags`: 새로고침할 때 관리자가 Discord에서 직접 추가한 태그 보존
+
+예를 들어 `archive, preserve_manual_tags`처럼 입력할 수 있습니다. `lock`과 `auto_refresh=true`를 함께 사용하면 최초 게시 뒤 스레드가 잠겨 자동 갱신할 수 없으므로 패널과 저장 결과에 경고가 표시됩니다. 자동 갱신 publication은 기본적으로 잠기지 않습니다.
+
 ## 핵심 개념
 
 ### 조직
@@ -345,6 +367,19 @@ display_order: 1
 - `/publication refresh`는 기존 메시지를 즉시 다시 계산합니다.
 - `/publication repair`는 기존 메시지가 삭제됐을 때 새 메시지를 만들고 연결합니다.
 - 게시 설정을 삭제해도 이미 게시된 Discord 메시지는 남습니다.
+
+포럼 publication은 기본 publication과 별도의 `forum_publication_settings` 레코드를 사용합니다. 다음 값이 포럼 설정에 저장됩니다.
+
+- 제목 Liquid 템플릿
+- 적용할 Discord forum tag ID 배열
+- 자동 보관 시간과 스레드 슬로우모드
+- 게시 후 보관·잠금 여부
+- 수동 태그 보존 여부
+- 생성된 thread ID
+
+태그 이름은 표시와 명령 입력에만 사용하며 영속 데이터의 기본 식별자로 저장하지 않습니다. 최초 게시에서는 유효한 태그만 `appliedTags`로 전달하고 thread ID와 starter-message ID를 각각 저장합니다.
+
+포럼 새로고침은 starter message 본문과 렌더링된 제목을 수정하고, 현재 포럼의 태그 목록을 기준으로 저장된 ID를 다시 검증합니다. `preserve_manual_tags=false`가 기본값이며 이때 설정된 태그 집합이 authoritative set(기준 태그 집합)입니다. `true`이면 Discord에서 직접 추가했고 아직 존재하는 태그를 가능한 범위에서 함께 보존합니다.
 
 ## 템플릿 작성법
 
@@ -492,6 +527,24 @@ Developer Portal → 애플리케이션 → `Bot` → `Privileged Gateway Intent
 - `/publication refresh publication_id:<ID>`로 수동 갱신을 시도합니다.
 - 봇이 대상 채널을 보고 메시지를 보내며 기록을 읽을 수 있는지 확인합니다.
 - 템플릿 결과가 2,000자를 넘지 않는지 확인합니다.
+- 포럼 publication이라면 스레드가 잠겨 있지 않은지 확인합니다.
+- 포럼의 태그가 삭제되었거나 태그 필수 설정으로 변경되지 않았는지 확인합니다.
+
+### 포럼 게시 진단 코드
+
+포럼 게시·새로고침 중 발생한 비차단 진단은 명령 결과와 자동 갱신 로그에 표시됩니다. 마지막 진단은 publication의 렌더링 상태에도 기록됩니다.
+
+| 코드 | 의미 |
+|---|---|
+| `FORUM_TAG_MISSING` | 저장된 tag ID가 현재 포럼에 없어 해당 태그를 제외함 |
+| `FORUM_TAG_LIMIT_EXCEEDED` | 설정 태그가 Discord 제한인 5개를 넘어 앞의 유효한 5개만 적용함 |
+| `FORUM_REQUIRES_TAG` | 태그 필수 포럼인데 적용 가능한 설정 태그가 없음 |
+| `FORUM_TITLE_EMPTY` | 제목 템플릿 또는 렌더링·정제된 제목이 비어 있음 |
+| `FORUM_SETTINGS_MISSING` | 포럼 publication의 별도 설정 레코드가 없음 |
+| `FORUM_THREAD_LOCKED` | 대상 포럼 스레드가 잠겨 새로고침할 수 없음 |
+| `FORUM_SETTING_UPDATE_FAILED` | 본문은 갱신했지만 제목, 태그 또는 스레드 설정 변경에 실패함 |
+
+`FORUM_TAG_MISSING`은 본문 게시를 막지 않습니다. 단, 포럼에서 태그를 필수로 요구하고 유효한 설정 태그가 하나도 남지 않으면 tagless post(태그 없는 게시물)를 만들지 않고 “현재 사용할 수 있는 태그 중 적어도 하나를 선택해 주세요”라는 오류를 반환합니다.
 
 ### 게시 메시지를 삭제함
 
@@ -516,6 +569,7 @@ Node.js 22 이상을 사용하고, 사용하는 Node.js 버전에 맞는 네이�
 - `.env`, `data`, `*.db`, 로그 파일은 Git에서 제외됩니다.
 - 조직을 삭제해도 임기와 감사 기록은 보존됩니다.
 - 게시 설정을 삭제해도 Discord에 이미 작성된 메시지는 보존됩니다.
+- 포럼 전용 값은 `forum_publication_settings`에 저장되고 publication 삭제 시 함께 삭제됩니다.
 - 하나의 SQLite 파일을 여러 서버의 봇 프로세스가 동시에 공유하지 마세요.
 - 운영 환경에서는 `data` 디렉터리를 영속 볼륨에 두고 토큰은 secret 저장소로 관리하는 것을 권장합니다.
 

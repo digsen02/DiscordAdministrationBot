@@ -65,6 +65,19 @@ export const publications = sqliteTable('publications', {
   broken: integer('broken', { mode: 'boolean' }).notNull().default(false), lastRenderedAt: integer('last_rendered_at', { mode: 'timestamp_ms' }), lastRenderError: text('last_render_error'), ...timestamps
 }, (t) => [index('publication_org_idx').on(t.organizationId), index('publication_channel_message_idx').on(t.channelId, t.messageId)]);
 
+export const forumPublicationSettings = sqliteTable('forum_publication_settings', {
+  publicationId: integer('publication_id').primaryKey().references(() => publications.id, { onDelete: 'cascade' }),
+  titleTemplate: text('title_template').notNull(),
+  appliedTagIdsJson: text('applied_tag_ids_json', { mode: 'json' }).$type<string[]>().notNull().default([]),
+  autoArchiveDuration: integer('auto_archive_duration').notNull().default(1440),
+  slowmodeSeconds: integer('slowmode_seconds').notNull().default(0),
+  archiveAfterPublish: integer('archive_after_publish', { mode: 'boolean' }).notNull().default(false),
+  lockAfterPublish: integer('lock_after_publish', { mode: 'boolean' }).notNull().default(false),
+  preserveManualTags: integer('preserve_manual_tags', { mode: 'boolean' }).notNull().default(false),
+  threadId: text('thread_id'),
+  ...timestamps
+});
+
 export const auditLogs = sqliteTable('audit_logs', {
   id: integer('id').primaryKey({ autoIncrement: true }), guildId: text('guild_id').notNull(), organizationId: integer('organization_id').references(() => organizations.id), actorUserId: text('actor_user_id').notNull(),
   action: text('action').notNull(), metadata: text('metadata', { mode: 'json' }).$type<Record<string, unknown>>().notNull(), createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull().$defaultFn(() => new Date())
@@ -81,3 +94,4 @@ export type Classification = typeof classifications.$inferSelect;
 export type ClassificationOption = typeof classificationOptions.$inferSelect;
 export type Term = typeof terms.$inferSelect;
 export type Publication = typeof publications.$inferSelect;
+export type ForumPublicationSettings = typeof forumPublicationSettings.$inferSelect;

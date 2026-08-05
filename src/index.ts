@@ -18,7 +18,7 @@ const databasePath = resolve(config.DATABASE_URL); mkdirSync(dirname(databasePat
 const { db, sqlite } = createDatabase(databasePath); migrate(db, { migrationsFolder: resolve('./drizzle') });
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers] });
 const publications = new PublicationService(db, client);
-const queue = new RefreshQueue((id) => publications.refresh(id), 5_000, (error, publicationId) => logger.error({ err: error, publicationId }, 'automatic publication refresh failed'));
+const queue = new RefreshQueue(async (id) => { const result = await publications.refresh(id); if (result.diagnostics.length) logger.warn({ publicationId: id, diagnostics: result.diagnostics }, 'automatic publication refresh diagnostics'); }, 5_000, (error, publicationId) => logger.error({ err: error, publicationId }, 'automatic publication refresh failed'));
 const handler = new InteractionHandler(db, publications, queue, logger);
 const scheduler = new TermScheduler(db, queue, (error) => logger.error({ err: error }, 'term scheduler failed')); installDiscordEvents(client, db, handler, queue, logger); scheduler.start();
 

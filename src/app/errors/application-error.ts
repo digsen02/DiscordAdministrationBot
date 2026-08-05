@@ -2,7 +2,10 @@ export type ErrorCode =
   | 'NOT_FOUND' | 'DUPLICATE_KEY' | 'ROLE_NOT_FOUND' | 'MISSING_PERMISSION'
   | 'INVALID_TERM_TRANSITION' | 'MULTIPLE_ACTIVE_TERMS' | 'INVALID_TEMPLATE'
   | 'OUTPUT_TOO_LONG' | 'PUBLICATION_DELETED' | 'CLASSIFICATION_CONFLICT'
-  | 'INVALID_FIELD_VALUE' | 'VALIDATION_ERROR';
+  | 'INVALID_FIELD_VALUE' | 'VALIDATION_ERROR'
+  | 'FORUM_TAG_MISSING' | 'FORUM_TAG_LIMIT_EXCEEDED' | 'FORUM_REQUIRES_TAG'
+  | 'FORUM_TITLE_EMPTY' | 'FORUM_SETTINGS_MISSING' | 'FORUM_THREAD_LOCKED'
+  | 'FORUM_SETTING_UPDATE_FAILED';
 
 export class ApplicationError extends Error {
   constructor(public readonly code: ErrorCode, message: string, public readonly details?: Readonly<Record<string, unknown>>) {

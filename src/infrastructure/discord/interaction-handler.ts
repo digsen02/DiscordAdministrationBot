@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { DateTime } from 'luxon';
 import { and, eq, isNull } from 'drizzle-orm';
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, StringSelectMenuBuilder, StringSelectMenuOptionBuilder, TextInputBuilder, TextInputStyle, type ButtonInteraction, type ChatInputCommandInteraction, type GuildMember, type ModalSubmitInteraction, type StringSelectMenuInteraction } from 'discord.js';
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, ModalBuilder, StringSelectMenuBuilder, StringSelectMenuOptionBuilder, TextInputBuilder, TextInputStyle, type ButtonInteraction, type ChatInputCommandInteraction, type ForumChannel, type GuildMember, type ModalSubmitInteraction, type StringSelectMenuInteraction } from 'discord.js';
 import { assertTermTransition, assertCanStartTerm, type TermStatus } from '../../domain/term/lifecycle.js';
 import { assertSafeKey } from '../../domain/shared/key.js';
 import { validateFieldValue } from '../../domain/custom-field/validator.js';
@@ -11,7 +11,7 @@ import { OrganizationService } from '../../app/services/organization-service.js'
 import { PermissionService } from '../../app/services/permission-service.js';
 import type { PublicationService } from '../../app/services/publication-service.js';
 import type { AppDatabase } from '../database/client.js';
-import { auditLogs, classificationOptions, classifications, customFieldDefinitions, customFieldValues, guildConfigs, organizations, publications, roleBindings, setupSessions, templates, terms } from '../database/schema.js';
+import { auditLogs, classificationOptions, classifications, customFieldDefinitions, customFieldValues, forumPublicationSettings, guildConfigs, organizations, publications, roleBindings, setupSessions, templates, terms } from '../database/schema.js';
 import type { Logger } from '../logging/logger.js';
 import type { RefreshQueue } from '../scheduler/refresh-queue.js';
 import { TemplateRenderer } from '../template/template-renderer.js';
@@ -29,6 +29,10 @@ export class InteractionHandler {
       if (!interaction.inCachedGuild()) throw new ApplicationError('VALIDATION_ERROR', '서버 안에서만 사용할 수 있습니다.');
       this.permissions.assertAdministrator(interaction.member as GuildMember);
       const subcommand = interaction.options.getSubcommand(); const destructive = subcommand === 'delete' || subcommand === 'remove';
+      if (interaction.commandName === 'publication' && subcommand === 'create') {
+        const selected = interaction.options.getChannel('channel', true);
+        if (selected.type === ChannelType.GuildForum) { await this.beginForumPublication(interaction, selected); return; }
+      }
       if (destructive && interaction.options.getBoolean('confirm') === null) {
         const sessionId = randomUUID(); const state = { command: interaction.commandName, organization: interaction.options.getString('organization'), key: interaction.options.getString('key'), classification: interaction.options.getString('classification'), name: interaction.options.getString('name'), publicationId: interaction.options.getInteger('publication_id') };
         this.db.insert(setupSessions).values({ id: sessionId, guildId: interaction.guildId, userId: interaction.user.id, kind: 'confirmation', state, expiresAt: new Date(Date.now() + 5 * 60_000) }).run();
@@ -62,6 +66,7 @@ export class InteractionHandler {
     const correlationId = randomUUID();
     try {
       if (!interaction.inCachedGuild()) throw new ApplicationError('VALIDATION_ERROR', '유효하지 않은 설정 화면입니다.');
+      if (interaction.customId.startsWith('forum:')) { await this.completeForumSettingsModal(interaction); return; }
       if (interaction.customId.startsWith('field:')) { this.permissions.assertAdministrator(interaction.member as GuildMember); const message = this.completeFieldSession(interaction.customId.slice('field:'.length), interaction.guildId, interaction.user.id, interaction.fields.getTextInputValue('value')); await interaction.reply({ content: message, ephemeral: true }); return; }
       if (!interaction.customId.startsWith('template:')) throw new ApplicationError('VALIDATION_ERROR', '유효하지 않은 설정 화면입니다.');
       this.permissions.assertAdministrator(interaction.member as GuildMember); const sessionId = interaction.customId.slice('template:'.length);
@@ -77,7 +82,13 @@ export class InteractionHandler {
   }
   async handleSelect(interaction: StringSelectMenuInteraction): Promise<void> {
     const correlationId = randomUUID();
-    try { if (!interaction.inCachedGuild() || !interaction.customId.startsWith('field:')) throw new ApplicationError('VALIDATION_ERROR', '유효하지 않은 선택 요청입니다.'); this.permissions.assertAdministrator(interaction.member as GuildMember); const message = this.completeFieldSession(interaction.customId.slice('field:'.length), interaction.guildId, interaction.user.id, interaction.values[0] ?? ''); await interaction.update({ content: message, components: [] }); }
+    try {
+      if (!interaction.inCachedGuild()) throw new ApplicationError('VALIDATION_ERROR', '유효하지 않은 선택 요청입니다.');
+      this.permissions.assertAdministrator(interaction.member as GuildMember);
+      if (interaction.customId.startsWith('forum-tags:')) { const sessionId = interaction.customId.slice('forum-tags:'.length); const selectedChannel = await interaction.guild.channels.fetch(String(this.forumSession(sessionId, interaction.guildId, interaction.user.id).publication.channelId)); if (!selectedChannel || selectedChannel.type !== ChannelType.GuildForum) throw new ApplicationError('VALIDATION_ERROR', '선택한 채널이 더 이상 포럼 채널이 아닙니다.'); const panel = await this.updateForumTags(sessionId, interaction.guildId, interaction.user.id, interaction.values, selectedChannel); await interaction.update(panel); return; }
+      if (!interaction.customId.startsWith('field:')) throw new ApplicationError('VALIDATION_ERROR', '유효하지 않은 선택 요청입니다.');
+      const message = this.completeFieldSession(interaction.customId.slice('field:'.length), interaction.guildId, interaction.user.id, interaction.values[0] ?? ''); await interaction.update({ content: message, components: [] });
+    }
     catch (error) { this.logger.error({ err: error, correlationId, guildId: interaction.guildId, userId: interaction.user.id }, 'select failed'); const content = `${userMessage(error)}\n문의 코드: ${correlationId}`; if (interaction.replied || interaction.deferred) await interaction.editReply({ content, components: [] }).catch(() => undefined); else await interaction.reply({ content, ephemeral: true }).catch(() => undefined); }
   }
   private completeFieldSession(sessionId: string, guildId: string, userId: string, rawValue: string): string {
@@ -88,7 +99,9 @@ export class InteractionHandler {
   async handleButton(interaction: ButtonInteraction): Promise<void> {
     const correlationId = randomUUID();
     try {
-      if (!interaction.inCachedGuild() || !interaction.customId.startsWith('confirm:')) throw new ApplicationError('VALIDATION_ERROR', '유효하지 않은 확인 요청입니다.'); this.permissions.assertAdministrator(interaction.member as GuildMember);
+      if (!interaction.inCachedGuild()) throw new ApplicationError('VALIDATION_ERROR', '유효하지 않은 확인 요청입니다.'); this.permissions.assertAdministrator(interaction.member as GuildMember);
+      if (interaction.customId.startsWith('forum:')) { await this.handleForumButton(interaction); return; }
+      if (!interaction.customId.startsWith('confirm:')) throw new ApplicationError('VALIDATION_ERROR', '유효하지 않은 확인 요청입니다.');
       const [, sessionId, decision] = interaction.customId.split(':'); if (!sessionId) throw new ApplicationError('VALIDATION_ERROR', '확인 요청 ID가 없습니다.'); const session = this.db.select().from(setupSessions).where(eq(setupSessions.id, sessionId)).get();
       if (!session || session.kind !== 'confirmation' || session.userId !== interaction.user.id || session.guildId !== interaction.guildId || session.expiresAt <= new Date()) throw new ApplicationError('VALIDATION_ERROR', '확인 요청이 만료되었습니다. 명령을 다시 실행해 주세요.'); this.db.delete(setupSessions).where(eq(setupSessions.id, sessionId)).run();
       if (decision !== 'yes') { await interaction.update({ content: '작업을 취소했습니다.', components: [] }); return; }
@@ -108,6 +121,115 @@ export class InteractionHandler {
       await interaction.update({ content: result, components: [] });
     } catch (error) { this.logger.error({ err: error, correlationId, guildId: interaction.guildId, userId: interaction.user.id }, 'button failed'); const content = `${userMessage(error)}\n문의 코드: ${correlationId}`; if (interaction.replied || interaction.deferred) await interaction.editReply({ content, components: [] }).catch(() => undefined); else await interaction.reply({ content, ephemeral: true }).catch(() => undefined); }
   }
+
+  private async beginForumPublication(interaction: ChatInputCommandInteraction<'cached'>, channel: ForumChannel): Promise<void> {
+    const org = this.organization(interaction); const templateName = interaction.options.getString('template', true);
+    const template = this.db.select().from(templates).where(and(eq(templates.organizationId, org.id), eq(templates.name, templateName))).get();
+    if (!template || template.isDraft) throw new ApplicationError('INVALID_TEMPLATE', '유효한 템플릿을 찾을 수 없습니다.');
+    const sessionId = randomUUID(); const autoRefresh = interaction.options.getBoolean('auto_refresh') ?? true;
+    const publication = this.db.transaction((tx) => {
+      const row = tx.insert(publications).values({ organizationId: org.id, templateId: template.id, name: interaction.options.getString('name', true), channelId: channel.id, autoRefresh: false }).returning().get();
+      tx.insert(forumPublicationSettings).values({ publicationId: row.id, titleTemplate: '', appliedTagIdsJson: [], autoArchiveDuration: channel.defaultAutoArchiveDuration ?? 1440, slowmodeSeconds: channel.defaultThreadRateLimitPerUser ?? 0 }).run();
+      tx.insert(setupSessions).values({ id: sessionId, guildId: interaction.guildId, userId: interaction.user.id, kind: 'forum_publication', state: { publicationId: row.id, autoRefresh }, expiresAt: new Date(Date.now() + 30 * 60_000) }).run();
+      return row;
+    });
+    this.audit(interaction, org.id, 'publication.draft_created', { publicationId: publication.id, channelType: 'forum' });
+    await interaction.reply({ ...(await this.forumPanel(sessionId, channel)), ephemeral: true });
+  }
+
+  private forumSession(sessionId: string, guildId: string, userId: string) {
+    const session = this.db.select().from(setupSessions).where(eq(setupSessions.id, sessionId)).get();
+    if (!session || session.kind !== 'forum_publication' || session.guildId !== guildId || session.userId !== userId || session.expiresAt <= new Date()) throw new ApplicationError('VALIDATION_ERROR', '포럼 게시 설정 화면이 만료되었습니다. /publication create를 다시 실행해 주세요.');
+    const publicationId = Number(session.state.publicationId); const publication = this.db.select().from(publications).where(eq(publications.id, publicationId)).get();
+    const settings = this.db.select().from(forumPublicationSettings).where(eq(forumPublicationSettings.publicationId, publicationId)).get();
+    if (!publication || !settings) throw new ApplicationError('FORUM_SETTINGS_MISSING', '포럼 게시 초안 또는 설정을 찾을 수 없습니다.');
+    return { session, publication, settings };
+  }
+
+  private async forumPanel(sessionId: string, channel: ForumChannel) {
+    const session = this.db.select().from(setupSessions).where(eq(setupSessions.id, sessionId)).get();
+    if (!session) throw new ApplicationError('VALIDATION_ERROR', '포럼 게시 설정 화면이 만료되었습니다.');
+    const publicationId = Number(session.state.publicationId); const publication = this.db.select().from(publications).where(eq(publications.id, publicationId)).get();
+    const settings = this.db.select().from(forumPublicationSettings).where(eq(forumPublicationSettings.publicationId, publicationId)).get();
+    if (!publication || !settings) throw new ApplicationError('FORUM_SETTINGS_MISSING', '포럼 게시 설정이 없습니다.');
+    const available = new Map(channel.availableTags.map((tag) => [tag.id, tag.name]));
+    const selected = settings.appliedTagIdsJson.map((id) => available.get(id) ?? `삭제됨(${id})`);
+    const autoRefresh = Boolean(session.state.autoRefresh); const warnings = settings.lockAfterPublish && autoRefresh ? '\n⚠️ 자동 갱신 게시물을 게시 후 잠그면 이후 갱신이 실패합니다.' : '';
+    const content = [
+      `**포럼 게시 설정 #${publication.id} — ${publication.name}**`,
+      `제목 템플릿: ${settings.titleTemplate ? `\`${settings.titleTemplate.slice(0, 120)}\`` : '**미입력 (저장 전 필수)**'}`,
+      `선택 태그: ${selected.length ? selected.join(', ') : '없음'}`,
+      `자동 보관: ${settings.autoArchiveDuration}분 · 슬로우모드: ${settings.slowmodeSeconds}초`,
+      `자동 갱신: ${autoRefresh ? '켜짐' : '꺼짐'} · 게시 후 보관: ${settings.archiveAfterPublish ? '켜짐' : '꺼짐'} · 게시 후 잠금: ${settings.lockAfterPublish ? '켜짐' : '꺼짐'}`,
+      `수동 태그 보존: ${settings.preserveManualTags ? '켜짐' : '꺼짐'}${warnings}`
+    ].join('\n');
+    const components: Array<ActionRowBuilder<StringSelectMenuBuilder> | ActionRowBuilder<ButtonBuilder>> = [];
+    if (channel.availableTags.length) {
+      const menu = new StringSelectMenuBuilder().setCustomId(`forum-tags:${sessionId}`).setPlaceholder('적용할 포럼 태그를 선택하세요').setMinValues(0).setMaxValues(Math.min(5, channel.availableTags.length)).addOptions(channel.availableTags.map((tag) => new StringSelectMenuOptionBuilder().setLabel(tag.name.slice(0, 100)).setValue(tag.id).setDefault(settings.appliedTagIdsJson.includes(tag.id))));
+      components.push(new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu));
+    }
+    components.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setCustomId(`forum:${sessionId}:configure`).setLabel('설정 입력').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId(`forum:${sessionId}:preview`).setLabel('미리보기').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`forum:${sessionId}:save`).setLabel('저장').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`forum:${sessionId}:cancel`).setLabel('취소').setStyle(ButtonStyle.Danger)
+    ));
+    return { content, components };
+  }
+
+  private async updateForumTags(sessionId: string, guildId: string, userId: string, tagIds: readonly string[], channel: ForumChannel) {
+    const { publication } = this.forumSession(sessionId, guildId, userId);
+    const availableIds = new Set(channel.availableTags.map((tag) => tag.id));
+    if (tagIds.length > 5 || tagIds.some((id) => !availableIds.has(id))) throw new ApplicationError('VALIDATION_ERROR', '유효한 포럼 태그를 최대 5개까지 선택해 주세요.');
+    this.db.update(forumPublicationSettings).set({ appliedTagIdsJson: [...tagIds] }).where(eq(forumPublicationSettings.publicationId, publication.id)).run();
+    return this.forumPanel(sessionId, channel);
+  }
+
+  private async completeForumSettingsModal(interaction: ModalSubmitInteraction<'cached'>): Promise<void> {
+    this.permissions.assertAdministrator(interaction.member as GuildMember);
+    const parts = interaction.customId.split(':'); const sessionId = parts[1];
+    if (!sessionId || parts[2] !== 'settings') throw new ApplicationError('VALIDATION_ERROR', '유효하지 않은 포럼 설정 화면입니다.');
+    const { publication } = this.forumSession(sessionId, interaction.guildId, interaction.user.id);
+    const titleTemplate = interaction.fields.getTextInputValue('title').trim(); this.renderer.validate(titleTemplate);
+    const autoArchiveDuration = Number(interaction.fields.getTextInputValue('archive_duration')); const slowmodeSeconds = Number(interaction.fields.getTextInputValue('slowmode'));
+    if (![60, 1440, 4320, 10080].includes(autoArchiveDuration)) throw new ApplicationError('VALIDATION_ERROR', '자동 보관 시간은 60, 1440, 4320, 10080분 중 하나여야 합니다.');
+    if (!Number.isInteger(slowmodeSeconds) || slowmodeSeconds < 0 || slowmodeSeconds > 21600) throw new ApplicationError('VALIDATION_ERROR', '슬로우모드는 0~21600초의 정수여야 합니다.');
+    const flags = new Set(interaction.fields.getTextInputValue('flags').toLowerCase().split(',').map((value) => value.trim()).filter(Boolean));
+    const allowedFlags = new Set(['archive', 'lock', 'preserve_manual_tags']); if ([...flags].some((flag) => !allowedFlags.has(flag))) throw new ApplicationError('VALIDATION_ERROR', '게시 후 동작에는 archive, lock, preserve_manual_tags만 쉼표로 입력할 수 있습니다.');
+    this.db.update(forumPublicationSettings).set({ titleTemplate, autoArchiveDuration, slowmodeSeconds, archiveAfterPublish: flags.has('archive'), lockAfterPublish: flags.has('lock'), preserveManualTags: flags.has('preserve_manual_tags') }).where(eq(forumPublicationSettings.publicationId, publication.id)).run();
+    const channel = await interaction.guild.channels.fetch(publication.channelId); if (!channel || channel.type !== ChannelType.GuildForum) throw new ApplicationError('VALIDATION_ERROR', '선택한 채널이 더 이상 포럼 채널이 아닙니다.');
+    await interaction.reply({ ...(await this.forumPanel(sessionId, channel)), ephemeral: true });
+  }
+
+  private async handleForumButton(interaction: ButtonInteraction<'cached'>): Promise<void> {
+    const [, sessionId, action] = interaction.customId.split(':'); if (!sessionId || !action) throw new ApplicationError('VALIDATION_ERROR', '유효하지 않은 포럼 설정 요청입니다.');
+    const { session, publication, settings } = this.forumSession(sessionId, interaction.guildId, interaction.user.id);
+    if (action === 'configure') {
+      const titleInput = new TextInputBuilder().setCustomId('title').setLabel('포럼 제목 Liquid 템플릿').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(1000); if (settings.titleTemplate) titleInput.setValue(settings.titleTemplate);
+      const inputs = [
+        titleInput,
+        new TextInputBuilder().setCustomId('archive_duration').setLabel('자동 보관(60/1440/4320/10080분)').setStyle(TextInputStyle.Short).setRequired(true).setValue(String(settings.autoArchiveDuration)),
+        new TextInputBuilder().setCustomId('slowmode').setLabel('슬로우모드(0~21600초)').setStyle(TextInputStyle.Short).setRequired(true).setValue(String(settings.slowmodeSeconds)),
+        new TextInputBuilder().setCustomId('flags').setLabel('archive, lock, preserve_manual_tags').setStyle(TextInputStyle.Short).setRequired(false).setValue([settings.archiveAfterPublish ? 'archive' : '', settings.lockAfterPublish ? 'lock' : '', settings.preserveManualTags ? 'preserve_manual_tags' : ''].filter(Boolean).join(', '))
+      ];
+      await interaction.showModal(new ModalBuilder().setCustomId(`forum:${sessionId}:settings`).setTitle('포럼 게시 상세 설정').addComponents(inputs.map((input) => new ActionRowBuilder<TextInputBuilder>().addComponents(input)))); return;
+    }
+    if (action === 'cancel') { this.db.transaction((tx) => { tx.delete(setupSessions).where(eq(setupSessions.id, sessionId)).run(); tx.delete(publications).where(eq(publications.id, publication.id)).run(); }); await interaction.update({ content: '포럼 게시 초안을 취소하고 삭제했습니다.', components: [] }); return; }
+    if (action === 'save') {
+      if (!settings.titleTemplate.trim()) throw new ApplicationError('FORUM_TITLE_EMPTY', '최종 저장 전에 포럼 제목 Liquid 템플릿을 입력해 주세요.'); this.renderer.validate(settings.titleTemplate);
+      const autoRefresh = Boolean(session.state.autoRefresh); this.db.transaction((tx) => { tx.update(publications).set({ autoRefresh }).where(eq(publications.id, publication.id)).run(); tx.delete(setupSessions).where(eq(setupSessions.id, sessionId)).run(); tx.insert(auditLogs).values({ guildId: interaction.guildId, organizationId: publication.organizationId, actorUserId: interaction.user.id, action: 'publication.created', metadata: { publicationId: publication.id, channelType: 'forum' } }).run(); });
+      const warning = settings.lockAfterPublish && autoRefresh ? '\n⚠️ 잠금 후에는 자동 갱신할 수 없습니다. lockAfterPublish 또는 autoRefresh를 끄는 것을 권장합니다.' : '';
+      await interaction.update({ content: `포럼 게시 설정 #${publication.id}을 저장했습니다. /publication publish로 게시하세요.${warning}`, components: [] }); return;
+    }
+    if (action === 'preview') {
+      if (!settings.titleTemplate.trim()) throw new ApplicationError('FORUM_TITLE_EMPTY', '미리보기 전에 포럼 제목 Liquid 템플릿을 입력해 주세요.');
+      const template = this.db.select().from(templates).where(eq(templates.id, publication.templateId)).get(); if (!template) throw new ApplicationError('NOT_FOUND', '본문 템플릿을 찾을 수 없습니다.');
+      const built = await new ContextBuilder(this.db).build(publication.organizationId, interaction.guild); const title = await this.renderer.render(settings.titleTemplate, built.context, { timeZone: built.timeZone, mentions: built.mentions, maxLength: 1000 }); const body = await this.renderer.render(template.content, built.context, { timeZone: built.timeZone, mentions: built.mentions });
+      await interaction.reply({ content: `**제목 미리보기**\n${title.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 100)}\n\n**본문 미리보기**\n${body}`, ephemeral: true }); return;
+    }
+    throw new ApplicationError('VALIDATION_ERROR', '지원하지 않는 포럼 설정 작업입니다.');
+  }
+
   private async dispatch(i: ChatInputCommandInteraction): Promise<string> {
     const sub = i.options.getSubcommand();
     switch (i.commandName) {
@@ -246,11 +368,15 @@ export class InteractionHandler {
       const channel = i.options.getChannel('channel', true); const row = this.db.insert(publications).values({ organizationId: org.id, templateId: template.id, name: i.options.getString('name', true), channelId: channel.id, autoRefresh: i.options.getBoolean('auto_refresh') ?? true }).returning().get(); this.audit(i, org.id, 'publication.created', { publicationId: row.id }); return `게시 설정 #${row.id}을 생성했습니다. /publication publish로 최초 메시지를 게시하세요.`;
     }
     const id = i.options.getInteger('publication_id', true); const row = this.db.select().from(publications).where(eq(publications.id, id)).get(); if (!row) throw new ApplicationError('NOT_FOUND', '게시 설정을 찾을 수 없습니다.');
-    if (sub === 'publish') { if (row.messageId) throw new ApplicationError('VALIDATION_ERROR', '이미 게시된 메시지가 있습니다. refresh를 사용하세요.'); await this.publicationService.refresh(id); this.audit(i, row.organizationId, 'publication.published', { publicationId: id }); return '게시물을 생성하고 메시지 ID를 저장했습니다.'; }
-    if (sub === 'refresh') { await this.publicationService.refresh(id); return '기존 게시물을 갱신했습니다.'; }
-    if (sub === 'repair') { await this.publicationService.refresh(id, true); this.audit(i, row.organizationId, 'publication.repaired', { publicationId: id }); return '대체 메시지를 만들고 게시 설정을 복구했습니다.'; }
-    if (sub === 'preview') { const template = this.db.select().from(templates).where(eq(templates.id, row.templateId)).get(); if (!template) throw new ApplicationError('NOT_FOUND', '템플릿을 찾을 수 없습니다.'); const built = await new ContextBuilder(this.db).build(row.organizationId, i.guild!); return this.renderer.render(template.content, built.context, { timeZone: built.timeZone, mentions: built.mentions }); }
+    if (sub === 'publish') { if (row.messageId) throw new ApplicationError('VALIDATION_ERROR', '이미 게시된 메시지가 있습니다. refresh를 사용하세요.'); const result = await this.publicationService.refresh(id); this.audit(i, row.organizationId, 'publication.published', { publicationId: id, diagnostics: result.diagnostics.map((diagnostic) => diagnostic.code) }); return `게시물을 생성하고 메시지 ID를 저장했습니다.${this.formatPublicationDiagnostics(result.diagnostics)}`; }
+    if (sub === 'refresh') { const result = await this.publicationService.refresh(id); return `기존 게시물을 갱신했습니다.${this.formatPublicationDiagnostics(result.diagnostics)}`; }
+    if (sub === 'repair') { const result = await this.publicationService.refresh(id, true); this.audit(i, row.organizationId, 'publication.repaired', { publicationId: id, diagnostics: result.diagnostics.map((diagnostic) => diagnostic.code) }); return `대체 메시지를 만들고 게시 설정을 복구했습니다.${this.formatPublicationDiagnostics(result.diagnostics)}`; }
+    if (sub === 'preview') { const template = this.db.select().from(templates).where(eq(templates.id, row.templateId)).get(); if (!template) throw new ApplicationError('NOT_FOUND', '템플릿을 찾을 수 없습니다.'); const built = await new ContextBuilder(this.db).build(row.organizationId, i.guild!); const body = await this.renderer.render(template.content, built.context, { timeZone: built.timeZone, mentions: built.mentions }); const forum = this.db.select().from(forumPublicationSettings).where(eq(forumPublicationSettings.publicationId, row.id)).get(); if (!forum) return body; if (!forum.titleTemplate.trim()) throw new ApplicationError('FORUM_TITLE_EMPTY', '포럼 제목 템플릿이 비어 있습니다.'); const title = await this.renderer.render(forum.titleTemplate, built.context, { timeZone: built.timeZone, mentions: built.mentions, maxLength: 1000 }); return `**포럼 제목**\n${title.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 100)}\n\n**본문**\n${body}`; }
     if (sub === 'delete' && i.options.getBoolean('confirm', true)) { this.db.delete(publications).where(eq(publications.id, id)).run(); this.audit(i, row.organizationId, 'publication.deleted', { publicationId: id }); return '게시 설정을 삭제했습니다. 기존 Discord 메시지는 보존됩니다.'; }
     return '작업이 취소되었습니다.';
+  }
+
+  private formatPublicationDiagnostics(diagnostics: ReadonlyArray<{ code: string; message: string }>): string {
+    return diagnostics.length ? `\n\n**진단**\n${diagnostics.map((diagnostic) => `⚠️ [${diagnostic.code}] ${diagnostic.message}`).join('\n')}` : '';
   }
 }
