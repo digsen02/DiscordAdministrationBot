@@ -3,6 +3,7 @@ import type { Organization } from '../../../database/schema.js';
 import type { templates } from '../../../database/schema.js';
 import { managementId } from '../core/custom-id.js';
 import { pageOf } from '../core/pagination.js';
+import { pageTarget, paginationRow } from '../core/panel-state.js';
 import { formatDraft, safeDescription, safeLabel } from '../presentation/formatters.js';
 
 type Template = typeof templates.$inferSelect;
@@ -13,15 +14,15 @@ export function templateBrowser(items: readonly TemplateBrowserItem[], owner: st
   const scope = organizationId === null ? '서버 전체' : (items[0]?.organization.name ?? '조직');
   const components: Array<ActionRowBuilder<StringSelectMenuBuilder | ButtonBuilder>> = [];
   if (page.items.length) components.push(new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
-    new StringSelectMenuBuilder().setCustomId(managementId('tpl', 'open', organizationId ?? 0, owner)).setPlaceholder('관리할 템플릿 선택').addOptions(
+    new StringSelectMenuBuilder().setCustomId(managementId('tpl', 'open', pageTarget(organizationId ?? 0, page.page), owner)).setPlaceholder('관리할 템플릿 선택').addOptions(
       page.items.map(({ template, organization, publicationCount }) => new StringSelectMenuOptionBuilder()
         .setLabel(safeLabel(template.name)).setValue(String(template.id))
         .setDescription(safeDescription(`${organization.name} · ${formatDraft(template.isDraft)} · 게시물 ${publicationCount}개에서 사용`)))
     )
   ));
-  if (page.pages > 1) components.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId(managementId('tpl', 'list', `${organizationId ?? 0}_${page.page - 1}`, owner)).setLabel('이전').setStyle(ButtonStyle.Secondary).setDisabled(page.page === 0),
-    new ButtonBuilder().setCustomId(managementId('tpl', 'list', `${organizationId ?? 0}_${page.page + 1}`, owner)).setLabel('다음').setStyle(ButtonStyle.Secondary).setDisabled(page.page + 1 >= page.pages)
+  components.push(paginationRow('tpl', 'list', organizationId ?? 0, page.page, page.pages, owner));
+  if (organizationId !== null) components.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId(managementId('tpl', 'new', `${organizationId}_${page.page}`, owner)).setLabel(items.length ? '새 템플릿 만들기' : '첫 템플릿 만들기').setStyle(ButtonStyle.Primary)
   ));
   if (organizationId !== null) components.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder().setCustomId(managementId('org', 'open', organizationId, owner)).setLabel('조직 관리로').setStyle(ButtonStyle.Secondary)

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { DateTime } from 'luxon';
 import { and, eq, isNull } from 'drizzle-orm';
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, ModalBuilder, StringSelectMenuBuilder, StringSelectMenuOptionBuilder, TextInputBuilder, TextInputStyle, type AutocompleteInteraction, type ButtonInteraction, type ChatInputCommandInteraction, type ForumChannel, type GuildMember, type ModalSubmitInteraction, type RoleSelectMenuInteraction, type StringSelectMenuInteraction } from 'discord.js';
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, ModalBuilder, StringSelectMenuBuilder, StringSelectMenuOptionBuilder, TextInputBuilder, TextInputStyle, type AutocompleteInteraction, type ButtonInteraction, type ChannelSelectMenuInteraction, type ChatInputCommandInteraction, type ForumChannel, type GuildMember, type ModalSubmitInteraction, type RoleSelectMenuInteraction, type StringSelectMenuInteraction } from 'discord.js';
 import { assertTermTransition, assertCanStartTerm, type TermStatus } from '../../domain/term/lifecycle.js';
 import { assertSafeKey } from '../../domain/shared/key.js';
 import { validateFieldValue } from '../../domain/custom-field/validator.js';
@@ -111,6 +111,18 @@ export class InteractionHandler {
       if (!await this.management.handleComponent(interaction)) throw new ApplicationError('VALIDATION_ERROR', '잘못된 역할 선택입니다.');
     } catch (error) {
       this.logger.error({ err: error, correlationId, guildId: interaction.guildId, userId: interaction.user.id }, 'role select failed');
+      const content = `${userMessage(error)}\n문의 코드: ${correlationId}`;
+      if (interaction.replied || interaction.deferred) await interaction.editReply({ content, components: [] }).catch(() => undefined);
+      else await interaction.reply({ content, ephemeral: true }).catch(() => undefined);
+    }
+  }
+  async handleChannelSelect(interaction: ChannelSelectMenuInteraction): Promise<void> {
+    const correlationId = randomUUID();
+    try {
+      if (!interaction.inCachedGuild()) throw new ApplicationError('VALIDATION_ERROR', '서버 안에서만 사용할 수 있습니다.');
+      if (!await this.management.handleComponent(interaction)) throw new ApplicationError('VALIDATION_ERROR', '잘못된 채널 선택입니다.');
+    } catch (error) {
+      this.logger.error({ err: error, correlationId, guildId: interaction.guildId, userId: interaction.user.id }, 'channel select failed');
       const content = `${userMessage(error)}\n문의 코드: ${correlationId}`;
       if (interaction.replied || interaction.deferred) await interaction.editReply({ content, components: [] }).catch(() => undefined);
       else await interaction.reply({ content, ephemeral: true }).catch(() => undefined);

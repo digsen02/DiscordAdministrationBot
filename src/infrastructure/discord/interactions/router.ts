@@ -1,10 +1,10 @@
-import type { ButtonInteraction, ChatInputCommandInteraction, ModalSubmitInteraction, RoleSelectMenuInteraction, StringSelectMenuInteraction } from 'discord.js';
+import type { ButtonInteraction, ChannelSelectMenuInteraction, ChatInputCommandInteraction, ModalSubmitInteraction, RoleSelectMenuInteraction, StringSelectMenuInteraction } from 'discord.js';
 import type { PublicationService } from '../../../app/services/publication-service.js';
 import type { AppDatabase } from '../../database/client.js';
 import type { RefreshQueue } from '../../scheduler/refresh-queue.js';
 import { ManagementInteractionController } from './controller.js';
 
-type ComponentInteraction = ButtonInteraction<'cached'> | StringSelectMenuInteraction<'cached'> | RoleSelectMenuInteraction<'cached'>;
+type ComponentInteraction = ButtonInteraction<'cached'> | StringSelectMenuInteraction<'cached'> | RoleSelectMenuInteraction<'cached'> | ChannelSelectMenuInteraction<'cached'>;
 
 /** Thin interaction entrypoint. Domain rendering and operations live in their domain modules/controller. */
 export class ManagementInteractionRouter {
